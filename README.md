@@ -1,4 +1,4 @@
-# Jarvis AI Bot - Your Complete Personal Assistant 🤖
+# PyBot - Your Complete Personal Assistant 🤖
 
 A powerful Telegram-based AI personal assistant with **19 core features** including weather forecasts, notes, reminders, shopping lists, web search, news, email management, task scheduling, life tracking, browser automation, and **AI learning that adapts to YOUR unique communication style**.
 
