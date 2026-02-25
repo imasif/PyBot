@@ -1,0 +1,11 @@
+{
+  "slug": "tracking",
+  "name": "Tracking Service",
+  "module": "services.tracking",
+  "class": "TrackingService",
+  "description": "Logs activities, sleep data, and generates reports with AI assistance.",
+  "commands": ["detect_tracking_request", "interpret_tracking_request", "generate_tracking_report", "generate_sleep_report"],
+  "keywords": ["track", "log", "sleep", "report", "habit", "activity"],
+  "enabled": true,
+  "instructions_file": "instructions.md"
+}

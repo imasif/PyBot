@@ -1,0 +1,11 @@
+{
+  "slug": "weather",
+  "name": "Weather Service",
+  "module": "services.weather",
+  "class": "WeatherService",
+  "description": "Retrieves current weather data from OpenWeatherMap for a city/country.",
+  "commands": ["get_weather"],
+  "keywords": ["weather", "forecast", "temperature", "rain", "wind", "humidity"],
+  "enabled": true,
+  "instructions_file": "instructions.md"
+}

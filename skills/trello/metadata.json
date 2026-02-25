@@ -1,0 +1,18 @@
+{
+  "slug": "trello",
+  "name": "Trello",
+  "module": "skills.trello.service",
+  "class": "TrelloService",
+  "description": "Manage Trello boards, lists, and cards via the Trello REST API.",
+  "commands": [
+    "list_boards",
+    "list_lists",
+    "list_cards",
+    "create_card",
+    "move_card",
+    "archive_card"
+  ],
+  "keywords": ["trello", "board", "boards", "list", "lists", "card", "cards", "kanban"],
+  "enabled": true,
+  "instructions_file": "instructions.md"
+}

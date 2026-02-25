@@ -1,0 +1,11 @@
+{
+  "slug": "cron_nl",
+  "name": "Natural Language Scheduler",
+  "module": "services.cron_nl",
+  "class": "CronNLService",
+  "description": "Parses natural language scheduling requests using the AI and manages cron jobs.",
+  "commands": ["parse_cron_from_text", "create_cron_from_natural_language", "manage_cron_job_nl"],
+  "keywords": ["schedule", "reminder", "cron", "natural language", "job"],
+  "enabled": true,
+  "instructions_file": "instructions.md"
+}

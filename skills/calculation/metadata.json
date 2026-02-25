@@ -1,0 +1,11 @@
+{
+  "slug": "calculation",
+  "name": "Calculation Service",
+  "module": "services.calculation",
+  "class": "CalculationService",
+  "description": "Recognizes math expressions or unit conversions and uses the AI to compute precise results.",
+  "commands": ["calculate", "convert", "handle"],
+  "keywords": ["calculate", "convert", "math", "units", "expression"],
+  "enabled": true,
+  "instructions_file": "instructions.md"
+}

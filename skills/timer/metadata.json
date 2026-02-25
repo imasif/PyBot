@@ -1,0 +1,11 @@
+{
+  "slug": "timer",
+  "name": "Timer Service",
+  "module": "services.timer",
+  "class": "TimerService",
+  "description": "Starts timers, lists active timers, and interprets duration strings.",
+  "commands": ["detect_request", "create_timer", "list_timers"],
+  "keywords": ["timer", "countdown", "set timer", "remind"],
+  "enabled": true,
+  "instructions_file": "instructions.md"
+}

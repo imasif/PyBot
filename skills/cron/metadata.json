@@ -1,0 +1,11 @@
+{
+  "slug": "cron",
+  "name": "Cron Executor",
+  "module": "services.cron",
+  "class": "CronService",
+  "description": "Executes background jobs, sends reminders, and runs ad-hoc shell commands.",
+  "commands": ["run_custom_command", "execute_cron_job"],
+  "keywords": ["cron", "job", "reminder", "schedule", "command"],
+  "enabled": true,
+  "instructions_file": "instructions.md"
+}

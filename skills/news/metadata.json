@@ -1,0 +1,11 @@
+{
+  "slug": "news",
+  "name": "News Service",
+  "module": "services.news",
+  "class": "NewsService",
+  "description": "Quotes the NewsAPI to deliver top headlines or topic-specific news digests.",
+  "commands": ["detect_request", "get_news"],
+  "keywords": ["news", "headlines", "latest", "updates", "topic"],
+  "enabled": true,
+  "instructions_file": "instructions.md"
+}

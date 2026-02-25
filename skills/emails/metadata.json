@@ -1,0 +1,11 @@
+{
+  "slug": "email",
+  "name": "Email Reader",
+  "module": "services.emails",
+  "class": "EmailService",
+  "description": "Connects to Gmail via IMAP to list unread or recent messages and read detailed content.",
+  "commands": ["list_unread", "list_recent", "search", "read_full"],
+  "keywords": ["email", "gmail", "inbox", "messages", "unread"],
+  "enabled": true,
+  "instructions_file": "instructions.md"
+}
