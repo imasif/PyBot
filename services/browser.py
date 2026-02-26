@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from urllib.parse import quote_plus
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -183,6 +184,12 @@ class BrowserAutomationService:
                     search_box.send_keys(query)
                     search_box.send_keys(Keys.RETURN)
                     result = f"🔍 Searched Google for: {query}"
+                elif search_engine in ["duckduckgo", "duck duck go", "ddg"]:
+                    driver.get(f"https://duckduckgo.com/?q={quote_plus(query)}")
+                    result = f"🔍 Searched DuckDuckGo for: {query}"
+                else:
+                    driver.get(f"https://duckduckgo.com/?q={quote_plus(query)}")
+                    result = f"🔍 Searched DuckDuckGo for: {query}"
 
             elif action_type == "open_url":
                 url = kwargs.get("url", "")

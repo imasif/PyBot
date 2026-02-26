@@ -235,6 +235,14 @@ def get_bot_name():
 def update_identity(new_content):
     """Update bot identity file"""
     try:
+        if new_content:
+            current_time_text = datetime.now().strftime("%A, %B %d, %Y, %H:%M")
+            new_content = re.sub(
+                r'(Current date and time\s*:\s*)([^\n\r]+)',
+                rf'\1{current_time_text}',
+                new_content,
+                flags=re.IGNORECASE,
+            )
         with open('identity.md', 'w') as f:
             f.write(new_content)
         return True
@@ -1093,12 +1101,35 @@ Only return the JSON, nothing else."""
         if re.match(phrase_pattern, text_lower):
             return {"is_command_request": False}
     
-    # YouTube playback patterns (must be explicit!)
+    # DuckDuckGo search patterns (explicit)
+    ddg_patterns = [
+        r'^(?:search(?:\s+using)?\s+(?:duck\s*duck\s*go|duckduckgo)\s*:?\s*)(.+)$',
+        r'^(?:duck\s*duck\s*go|duckduckgo)\s*:?\s*(.+)$',
+        r'^search\s+for\s+(.+?)\s+(?:on|using)\s+(?:duck\s*duck\s*go|duckduckgo)$',
+    ]
+
+    for pattern in ddg_patterns:
+        match = re.search(pattern, text_lower, re.IGNORECASE)
+        if match:
+            search_query = match.group(1).strip()
+            search_query = re.sub(r'\b(please|pls|plz)\b', '', search_query).strip(' :,-')
+            if len(search_query) < 2:
+                continue
+            return {
+                "is_command_request": True,
+                "command": "BROWSER_AUTOMATION",
+                "action": "web_search",
+                "params": {"query": search_query, "engine": "duckduckgo"},
+                "explanation": f"Searching DuckDuckGo for '{search_query}'",
+                "confidence": "high"
+            }
+
+    # YouTube playback patterns (must explicitly mention YouTube)
     youtube_patterns = [
-        r'^(?:open chrome and )?(?:play|search|find|watch)\s+(?:on youtube\s+)?(?:for\s+)?[:\-]?\s*(.+?)(?:\s+on youtube)?$',
-        r'^youtube\s+(?:search|play|open|find)\s+(?:for\s+)?(.+)',
-        r'^(?:play|watch)\s+(.+?)\s+(?:on|in)\s+youtube',
-        r'^open\s+youtube\s+(?:and\s+)?(?:play|search|find)\s+(.+)',
+        r'^(?:open\s+)?youtube\s+(?:and\s+)?(?:play|search|find|watch)\s+(?:for\s+)?(.+)$',
+        r'^(?:play|watch)\s+(.+?)\s+(?:on|in)\s+youtube$',
+        r'^(?:search|find)\s+youtube\s+(?:for\s+)?(.+)$',
+        r'^open\s+youtube\s+(?:and\s+)?(?:play|search|find|watch)\s+(.+)$',
     ]
     
     for pattern in youtube_patterns:

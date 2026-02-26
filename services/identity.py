@@ -1,10 +1,20 @@
 import logging
 import re
+from datetime import datetime
 
 import database
 
 
 logger = logging.getLogger(__name__)
+
+
+def _sync_current_datetime(identity_text):
+    if not identity_text:
+        return identity_text
+
+    now_str = datetime.now().strftime("%A, %B %d, %Y, %H:%M")
+    pattern = r'(Current date and time\s*:\s*)([^\n\r]+)'
+    return re.sub(pattern, rf'\1{now_str}', identity_text, flags=re.IGNORECASE)
 
 
 class IdentityService:
@@ -36,6 +46,7 @@ Return the FULL updated identity.md content:'''
             updated_identity = ask_ollama(prompt, chat_history=chat_history)
             updated_identity = re.sub(r'^```(?:markdown)?\n', '', updated_identity, flags=re.MULTILINE)
             updated_identity = re.sub(r'\n```$', '', updated_identity, flags=re.MULTILINE)
+            updated_identity = _sync_current_datetime(updated_identity)
             return updated_identity.strip()
         except Exception as e:
             logger.error(f"Error processing identity update: {e}")
