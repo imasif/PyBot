@@ -277,8 +277,8 @@ Test with:
 - Natural language detection with regex
 - AI-powered parsing for complex inputs
 
-### Modular Skills (OpenClaw-style)
-- Player services are defined through paired metadata.json + instructions.md files under `skills`, mirroring the OpenClaw skill format.
+### Modular Skills
+- Player services are defined through paired metadata.json + instructions.md files under `skills`.
 - `services/plugin_registry.py` scans the folders, reads the markdown documentation, and instantiates the configured class so adding or swapping services is as simple as dropping new files.
 - Consult `skills/README.md` for the exact schema and naming conventions when adding a new skill.
 

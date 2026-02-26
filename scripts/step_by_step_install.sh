@@ -37,7 +37,7 @@ for arg in "$@"; do
   esac
 done
 
-echo "🚀 PyBot Guided Installer (OpenClaw-style)"
+echo "🚀 PyBot Guided Installer"
 echo "Project: $ROOT_DIR"
 echo
 

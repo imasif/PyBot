@@ -5,12 +5,12 @@ This guide gives you:
 - `.env` settings
 - A build process for an executable binary
 
-## OpenClaw-style (recommended)
+## Run (recommended)
 
 Run one guided command:
 
 ```bash
-./scripts/install_openclaw_style.sh
+./scripts/step_by_step_install.sh
 ```
 
 It will:
@@ -27,7 +27,7 @@ systemctl --user status pybot --no-pager
 journalctl --user -u pybot -n 80 --no-pager
 ```
 
-## OpenClaw-style (non-interactive / CI)
+## Run (non-interactive / CI)
 
 Use this when you want zero prompts.
 
@@ -56,7 +56,7 @@ export OPENAI_MODEL="gpt-4o-mini"
 Run full non-interactive install:
 
 ```bash
-./scripts/install_openclaw_style.sh --non-interactive --overwrite-env --build-binary --with-systemd
+./scripts/step_by_step_install.sh --non-interactive --overwrite-env --build-binary --with-systemd
 ```
 
 Optional integrations can also be provided as env vars before running:

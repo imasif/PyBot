@@ -195,7 +195,7 @@ Weather (3 patterns):
 
 ## 🔌 Modular Skills
 
-Each bot capability is defined as an OpenClaw-style skill under `skills/<slug>` with a `metadata.json` file for machine-readable configuration and an `instructions.md` file for human-readable guidance. The loader at `services/plugin_registry.py` reads those files and instantiates the requested class so you can plug new services simply by dropping paired JSON/Markdown definitions.
+Each bot capability is defined as a skill under `skills/<slug>` with a `metadata.json` file for machine-readable configuration and an `instructions.md` file for human-readable guidance. The loader at `services/plugin_registry.py` reads those files and instantiates the requested class so you can plug new services simply by dropping paired JSON/Markdown definitions.
 
 ## 🔧 Setup Required
 

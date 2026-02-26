@@ -1,6 +1,6 @@
-# Service Skills (OpenClaw-style)
+# Service Skills
 
-Each service that powers the bot is defined as a skill, similar to OpenClaw skills:
+Each service that powers the bot is defined as a skill:
 
 1. `metadata.json` contains the machine-readable definition (slug, module, class, keywords).
 2. `instructions.md` describes the human-readable behavior, triggers, and capabilities.
