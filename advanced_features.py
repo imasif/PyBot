@@ -18,7 +18,7 @@ def parse_plan_steps(ai_text: str, max_steps: int = 8) -> List[str]:
 
 
 def interpret_advanced_nl_request(text: str) -> Optional[Dict[str, str]]:
-    """Interpret OpenClaw-like natural language tool requests."""
+    """Interpret natural language tool requests."""
     msg = text.strip()
     msg_lower = msg.lower().strip()
 
