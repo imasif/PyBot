@@ -30,6 +30,12 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 # Performance Settings
 CHAT_HISTORY_LIMIT = int(os.getenv("CHAT_HISTORY_LIMIT", "5"))  # Number of previous messages to remember
 
+# Universal NLU Configuration (semantic intent fallback)
+raw_nlu_enabled = os.getenv("NLU_ENABLED", "true").strip().lower()
+NLU_ENABLED = raw_nlu_enabled in ["1", "true", "yes", "on"]
+NLU_MODEL = os.getenv("NLU_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+NLU_MIN_CONFIDENCE = float(os.getenv("NLU_MIN_CONFIDENCE", "0.22"))
+
 # RAG Configuration
 raw_rag_enabled = os.getenv("RAG_ENABLED", "true").strip().lower()
 RAG_ENABLED = raw_rag_enabled in ["1", "true", "yes", "on"]

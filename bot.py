@@ -40,6 +40,7 @@ from services.emails import (
     interpret_email_request,
     interpret_read_email_request,
 )
+from services.nlu import UniversalNLUService
 
 # Initialize database
 database.init_db()
@@ -68,6 +69,7 @@ identity_service = service_instances.get("identity")
 cron_nl_service = service_instances.get("cron_nl")
 tracking_service = service_instances.get("tracking")
 trello_service = service_instances.get("trello")
+nlu_service = UniversalNLUService()
 
 ALLOWED_CONFIG_KEYS = [
     'TELEGRAM_BOT_TOKEN', 'CRON_NOTIFY_USER_ID',
@@ -76,6 +78,7 @@ ALLOWED_CONFIG_KEYS = [
     'WHATSAPP_TWILIO_NUMBER', 'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
     'AI_BACKEND', 'OLLAMA_URL', 'OLLAMA_MODEL',
     'CHAT_HISTORY_LIMIT',
+    'NLU_ENABLED', 'NLU_MODEL', 'NLU_MIN_CONFIDENCE',
     'RAG_ENABLED', 'RAG_KB_DIR', 'RAG_CHUNK_SIZE', 'RAG_TOP_K', 'RAG_MAX_CONTEXT_CHARS',
     'OPENAI_API_KEY', 'OPENAI_MODEL',
     'GMAIL_EMAIL', 'GMAIL_APP_PASSWORD',
@@ -85,8 +88,9 @@ ALLOWED_CONFIG_KEYS = [
     'DASHBOARD_JWT_SECRET', 'DASHBOARD_JWT_ALGORITHM',
     'DASHBOARD_JWT_EXPIRE_HOURS', 'DASHBOARD_AUTO_REFRESH_SECONDS',
 ]
-NUMERIC_CONFIG_KEYS = {'CHAT_HISTORY_LIMIT', 'RAG_TOP_K', 'RAG_CHUNK_SIZE', 'RAG_MAX_CONTEXT_CHARS', 'DASHBOARD_JWT_EXPIRE_HOURS', 'DASHBOARD_AUTO_REFRESH_SECONDS'}
-BOOLEAN_CONFIG_KEYS = {'RAG_ENABLED'}
+NUMERIC_CONFIG_KEYS = {'CHAT_HISTORY_LIMIT', 'NLU_MIN_CONFIDENCE', 'RAG_TOP_K', 'RAG_CHUNK_SIZE', 'RAG_MAX_CONTEXT_CHARS', 'DASHBOARD_JWT_EXPIRE_HOURS', 'DASHBOARD_AUTO_REFRESH_SECONDS'}
+BOOLEAN_CONFIG_KEYS = {'NLU_ENABLED', 'RAG_ENABLED'}
+FLOAT_CONFIG_KEYS = {'NLU_MIN_CONFIDENCE'}
 SENSITIVE_CONFIG_KEYS = {
     'TELEGRAM_BOT_TOKEN', 'OPENAI_API_KEY', 'OPENWEATHER_API_KEY', 'NEWSAPI_KEY',
     'GMAIL_APP_PASSWORD', 'DISCORD_BOT_TOKEN', 'WHATSAPP_TWILIO_AUTH_TOKEN',
@@ -177,6 +181,8 @@ def _reload_runtime_config():
 
 def _coerce_config_value(key, value):
     normalized_key = key.upper()
+    if normalized_key in FLOAT_CONFIG_KEYS:
+        return float(value)
     if normalized_key in NUMERIC_CONFIG_KEYS:
         return int(value)
     if normalized_key in BOOLEAN_CONFIG_KEYS:
@@ -1715,6 +1721,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
   • "play love song on youtube"
   • "search google for python tutorial"
 
+✉️ **Telegram Messaging:**
+    • /sendto <chat_id> <message>
+    • Example: /sendto 123456789 Hello there
+
 Everything works with natural language - just tell me what you need!"""
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -1952,6 +1962,42 @@ Examples:
     
     result = run_custom_command(command)
     await update.message.reply_text(result)
+
+
+async def sendto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /sendto command - send a Telegram message to another chat/user ID."""
+    if not is_user_allowed(update.effective_user.id):
+        await update.message.reply_text("You are not authorized to use this bot.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /sendto <chat_id> <message>\n"
+            "Example: /sendto 123456789 Hello from my bot"
+        )
+        return
+
+    target_chat_raw = context.args[0].strip()
+    message_text = " ".join(context.args[1:]).strip()
+
+    if not message_text:
+        await update.message.reply_text("❌ Message text is required.")
+        return
+
+    try:
+        target_chat_id = int(target_chat_raw)
+    except ValueError:
+        await update.message.reply_text("❌ chat_id must be numeric (for groups it may be negative).")
+        return
+
+    try:
+        await context.bot.send_message(chat_id=target_chat_id, text=message_text)
+        await update.message.reply_text(f"✅ Message sent to chat_id {target_chat_id}.")
+    except Exception as exc:
+        logger.error(f"Failed to send /sendto message: {exc}")
+        await update.message.reply_text(
+            "❌ Could not send message. The target user/group must have started or allowed this bot, and the chat_id must be correct."
+        )
 
 async def learned_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /learned command - show what the bot has learned"""
@@ -3063,6 +3109,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"Message from {user_name} ({user_id}): {user_message}")
 
+    nlu_hint = nlu_service.detect_intent(user_message) if nlu_service else None
+    nlu_intent = (nlu_hint or {}).get('intent')
+    nlu_confidence = (nlu_hint or {}).get('confidence')
+    if nlu_intent:
+        logger.info(f"NLU intent hint: {nlu_intent} (confidence: {nlu_confidence:.3f})")
+
     # Show typing (best effort only; should never abort handling)
     try:
         await update.message.chat.send_action(action="typing")
@@ -3331,6 +3383,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Check if this is a weather request (with AI learning)
     weather_detection = detect_weather_request(user_message, user_id)
+    if not weather_detection and nlu_intent == 'weather':
+        weather_detection = detect_weather_request("weather", user_id)
     if weather_detection and weather_detection.get('is_weather'):
         city = weather_detection.get('city')
         country_code = weather_detection.get('country_code')
@@ -3458,6 +3512,8 @@ _Or just reply with the city name if it's unique_"""
 
     # Check if this is a Wikipedia request
     wiki_detection = detect_wikipedia_request(user_message, user_id)
+    if not wiki_detection and nlu_intent == 'wikipedia':
+        wiki_detection = {'action': 'wiki', 'query': user_message}
     if wiki_detection and not detect_search_request(user_message, user_id):
         query = wiki_detection.get('query')
         await update.message.reply_text(f"📚 Searching Wikipedia for '{query}'...")
@@ -3468,6 +3524,8 @@ _Or just reply with the city name if it's unique_"""
 
     # Check if this is a web search request
     search_detection = detect_search_request(user_message, user_id)
+    if not search_detection and nlu_intent == 'search':
+        search_detection = {'action': 'search', 'query': user_message}
     if search_detection:
         query = search_detection.get('query')
         await update.message.reply_text(f"🔍 Searching for '{query}'...")
@@ -3478,6 +3536,8 @@ _Or just reply with the city name if it's unique_"""
 
     # Check if this is a news request
     news_detection = detect_news_request(user_message, user_id)
+    if not news_detection and nlu_intent == 'news':
+        news_detection = {'action': 'news', 'topic': None}
     if news_detection:
         topic = news_detection.get('topic')
         msg = f"📰 Fetching news{' about ' + topic if topic else ''}..."
@@ -3489,12 +3549,16 @@ _Or just reply with the city name if it's unique_"""
 
     # Check if this is a status request
     status_detection = detect_status_request(user_message, user_id)
+    if not status_detection and nlu_intent == 'status':
+        status_detection = {'action': 'status'}
     if status_detection:
         await status_command(update, context)
         return
 
     # Check if this is a daily briefing request
     briefing_detection = detect_briefing_request(user_message, user_id)
+    if not briefing_detection and nlu_intent == 'briefing':
+        briefing_detection = {'action': 'briefing'}
     if briefing_detection:
         await update.message.reply_text("📋 Preparing your daily briefing...")
         result = generate_daily_briefing(user_id)
@@ -3949,6 +4013,7 @@ async def setup_bot_commands(application):
         BotCommand("listjobs", "List all scheduled tasks and reminders"),
         BotCommand("removejob", "Remove a scheduled task (use: /removejob <name>)"),
         BotCommand("run", "Execute a system command (use: /run <command>)"),
+        BotCommand("sendto", "Send Telegram message to chat_id"),
     ]
     await application.bot.set_my_commands(commands)
     logger.info("Bot commands menu registered with Telegram")
@@ -4008,6 +4073,7 @@ def main():
     app.add_handler(CommandHandler("listjobs", listjobs_command))
     app.add_handler(CommandHandler("removejob", removejob_command))
     app.add_handler(CommandHandler("run", run_command))
+    app.add_handler(CommandHandler("sendto", sendto_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 

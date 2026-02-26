@@ -172,6 +172,11 @@ GMAIL_APP_PASSWORD=your_app_password
 DISCORD_BOT_TOKEN=your_discord_bot_token
 DISCORD_ALLOWED_CHANNEL_IDS=123456789012345678,987654321098765432
 
+# Universal semantic NLU fallback (optional)
+NLU_ENABLED=true
+NLU_MODEL=sentence-transformers/all-MiniLM-L6-v2
+NLU_MIN_CONFIDENCE=0.22
+
 # WhatsApp bridge via Twilio (optional)
 WHATSAPP_TWILIO_ACCOUNT_SID=your_twilio_account_sid
 WHATSAPP_TWILIO_AUTH_TOKEN=your_twilio_auth_token
