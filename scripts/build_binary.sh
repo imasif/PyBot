@@ -49,6 +49,7 @@ BUILD_CMD=(
   --onedir
   --add-data "skills:skills"
   --add-data "services:services"
+  --add-data "scripts:scripts"
   --add-data ".env.example:.env.example"
   bot.py
 )

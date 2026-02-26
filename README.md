@@ -60,6 +60,26 @@ A powerful Telegram-based AI personal assistant with **19 core features** includ
 
 For full setup + binary build instructions, see [INSTALL.md](INSTALL.md).
 
+### Built-in Onboarding and Gateway Commands
+
+Onboarding is handled by bash script:
+
+```bash
+./scripts/onboarding.sh
+```
+
+The binary `onboard` command delegates to that script:
+
+```bash
+./dist/pybot/pybot onboard
+./dist/pybot/pybot gateway list
+./dist/pybot/pybot gateway set OPENWEATHER_API_KEY <your_key>
+```
+
+From Telegram chat you can also edit config using:
+- `/setconfig KEY VALUE`
+- `/gateway set KEY VALUE`
+
 ### Download Prebuilt Binaries (GitHub Releases)
 
 Each tagged release publishes these assets automatically via GitHub Actions:
@@ -99,7 +119,7 @@ Run binary after extracting:
 1. **Clone the repository**
    ```bash
    git clone <repository-url>
-   cd MyPyBot
+   cd PyBot
    ```
 
 2. **Create virtual environment**

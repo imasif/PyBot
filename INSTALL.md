@@ -1,24 +1,39 @@
 # Installation and Binary Build (Linux)
 
 This guide gives you:
-- Step-by-step installation
-- `.env` settings
-- A build process for an executable binary
+- Bash onboarding (`scripts/onboarding.sh`)
+- Built-in config management (`gateway`)
+- A build process for executable binaries
 
-## Run (recommended)
+## Run (recommended: bash onboarding)
 
-Run one guided command:
+Run onboarding script first:
 
 ```bash
-./scripts/step_by_step_install.sh
+./scripts/onboarding.sh
 ```
 
-It will:
-- create/use `.venv`
-- install dependencies
-- prompt required `.env` values
-- optionally build binary
-- optionally install/start user `systemd` service
+Then run the binary:
+
+```bash
+./dist/pybot/pybot
+```
+
+The binary `onboard` command delegates to this bash script.
+
+You can also run onboarding explicitly:
+
+```bash
+./dist/pybot/pybot onboard
+```
+
+And later edit settings from CLI:
+
+```bash
+./dist/pybot/pybot gateway list
+./dist/pybot/pybot gateway get OPENWEATHER_API_KEY
+./dist/pybot/pybot gateway set OPENWEATHER_API_KEY <your_key>
+```
 
 Quick verify after install:
 
@@ -29,38 +44,8 @@ journalctl --user -u pybot -n 80 --no-pager
 
 ## Run (non-interactive / CI)
 
-Use this when you want zero prompts.
-
-Required env vars:
-
-```bash
-export TELEGRAM_BOT_TOKEN="<your_bot_token>"
-export CRON_NOTIFY_USER_ID="<your_telegram_user_id>"
-export AI_BACKEND="ollama"   # or openai
-```
-
-If `AI_BACKEND=ollama` (optional with defaults):
-
-```bash
-export OLLAMA_URL="http://127.0.0.1:11434/api/generate"
-export OLLAMA_MODEL="llama3.2"
-```
-
-If `AI_BACKEND=openai` (required):
-
-```bash
-export OPENAI_API_KEY="<your_openai_api_key>"
-export OPENAI_MODEL="gpt-4o-mini"
-```
-
-Run full non-interactive install:
-
-```bash
-./scripts/step_by_step_install.sh --non-interactive --overwrite-env --build-binary --with-systemd
-```
-
-Optional integrations can also be provided as env vars before running:
-`OPENWEATHER_API_KEY`, `NEWSAPI_KEY`, `GMAIL_EMAIL`, `GMAIL_APP_PASSWORD`, `TRELLO_API_KEY`, `TRELLO_TOKEN`.
+For CI, you can pre-create `.env` and run binary with `gateway` commands.
+Legacy script-based installers still exist under `scripts/`, but are optional.
 
 ## 1) Clone and enter project
 
@@ -83,13 +68,9 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## 4) Create `.env`
+## 4) Create `.env` (if running from source)
 
-```bash
-./scripts/setup_env.sh
-```
-
-The script will ask required settings:
+You can still create it manually from source mode:
 
 ```env
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
@@ -100,7 +81,7 @@ OLLAMA_URL=http://127.0.0.1:11434/api/generate
 OLLAMA_MODEL=llama3.2
 ```
 
-If you choose `AI_BACKEND=openai`, it will ask for `OPENAI_API_KEY` instead.
+If you choose `AI_BACKEND=openai`, include `OPENAI_API_KEY`.
 
 Manual alternative:
 
@@ -153,7 +134,14 @@ From project root (recommended):
 ./dist/pybot/pybot
 ```
 
-Keep `.env` in the working directory where you run the binary.
+On first run, this will prompt onboarding automatically if required values are missing.
+
+You can manage config later with:
+
+```bash
+./dist/pybot/pybot gateway list
+./dist/pybot/pybot gateway set KEY VALUE
+```
 
 ## 8) Notes for production
 

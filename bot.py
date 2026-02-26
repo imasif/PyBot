@@ -1,5 +1,7 @@
 # bot.py
+import argparse
 import asyncio
+import getpass
 import html
 import importlib
 import json
@@ -8,6 +10,7 @@ import math
 import os
 import platform
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -65,6 +68,273 @@ identity_service = service_instances.get("identity")
 cron_nl_service = service_instances.get("cron_nl")
 tracking_service = service_instances.get("tracking")
 trello_service = service_instances.get("trello")
+
+ALLOWED_CONFIG_KEYS = [
+    'TELEGRAM_BOT_TOKEN', 'CRON_NOTIFY_USER_ID',
+    'DISCORD_BOT_TOKEN', 'DISCORD_ALLOWED_CHANNEL_IDS',
+    'WHATSAPP_TWILIO_ACCOUNT_SID', 'WHATSAPP_TWILIO_AUTH_TOKEN',
+    'WHATSAPP_TWILIO_NUMBER', 'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
+    'AI_BACKEND', 'OLLAMA_URL', 'OLLAMA_MODEL',
+    'CHAT_HISTORY_LIMIT',
+    'RAG_ENABLED', 'RAG_KB_DIR', 'RAG_CHUNK_SIZE', 'RAG_TOP_K', 'RAG_MAX_CONTEXT_CHARS',
+    'OPENAI_API_KEY', 'OPENAI_MODEL',
+    'GMAIL_EMAIL', 'GMAIL_APP_PASSWORD',
+    'OPENWEATHER_API_KEY', 'DEFAULT_CITY', 'DEFAULT_COUNTRY_CODE',
+    'NEWSAPI_KEY',
+    'TRELLO_API_KEY', 'TRELLO_TOKEN',
+    'DASHBOARD_JWT_SECRET', 'DASHBOARD_JWT_ALGORITHM',
+    'DASHBOARD_JWT_EXPIRE_HOURS', 'DASHBOARD_AUTO_REFRESH_SECONDS',
+]
+NUMERIC_CONFIG_KEYS = {'CHAT_HISTORY_LIMIT', 'RAG_TOP_K', 'RAG_CHUNK_SIZE', 'RAG_MAX_CONTEXT_CHARS', 'DASHBOARD_JWT_EXPIRE_HOURS', 'DASHBOARD_AUTO_REFRESH_SECONDS'}
+BOOLEAN_CONFIG_KEYS = {'RAG_ENABLED'}
+SENSITIVE_CONFIG_KEYS = {
+    'TELEGRAM_BOT_TOKEN', 'OPENAI_API_KEY', 'OPENWEATHER_API_KEY', 'NEWSAPI_KEY',
+    'GMAIL_APP_PASSWORD', 'DISCORD_BOT_TOKEN', 'WHATSAPP_TWILIO_AUTH_TOKEN',
+    'WHATSAPP_TWILIO_ACCOUNT_SID', 'TRELLO_API_KEY', 'TRELLO_TOKEN', 'DASHBOARD_JWT_SECRET'
+}
+REQUIRED_ONBOARD_KEYS = {'TELEGRAM_BOT_TOKEN', 'CRON_NOTIFY_USER_ID', 'AI_BACKEND'}
+
+
+def get_app_root():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_env_path():
+    return os.path.join(get_app_root(), '.env')
+
+
+def get_env_example_path():
+    return os.path.join(get_app_root(), '.env.example')
+
+
+def is_placeholder_value(value):
+    if not value:
+        return True
+    normalized = str(value).strip().lower()
+    placeholder_tokens = [
+        'your_', 'your-', '_here', 'change_me', 'changeme', 'example',
+        'token_here', 'api_key_here', 'password_here'
+    ]
+    return any(token in normalized for token in placeholder_tokens)
+
+
+def _read_env_values(env_path=None):
+    path = env_path or get_env_path()
+    values = {}
+    if not os.path.exists(path):
+        return values
+    try:
+        with open(path, 'r', encoding='utf-8') as env_file:
+            for raw_line in env_file:
+                line = raw_line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                values[key.strip()] = value.strip()
+    except Exception as exc:
+        logger.error(f"Failed to read env file {path}: {exc}")
+    return values
+
+
+def _parse_env_example(example_path=None):
+    path = example_path or get_env_example_path()
+    entries = []
+    if not os.path.exists(path):
+        return entries
+
+    try:
+        with open(path, 'r', encoding='utf-8') as env_file:
+            for raw_line in env_file:
+                line = raw_line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, default = line.split('=', 1)
+                entries.append((key.strip(), default.strip()))
+    except Exception as exc:
+        logger.error(f"Failed to parse .env.example: {exc}")
+    return entries
+
+
+def _sanitize_default(value):
+    return '' if is_placeholder_value(value) else value
+
+
+def _mask_value(key, value):
+    if value is None or value == '':
+        return ''
+    if key in SENSITIVE_CONFIG_KEYS:
+        if len(value) <= 6:
+            return '*' * len(value)
+        return f"{value[:3]}***{value[-3:]}"
+    return value
+
+
+def _reload_runtime_config():
+    importlib.reload(config)
+
+
+def _coerce_config_value(key, value):
+    normalized_key = key.upper()
+    if normalized_key in NUMERIC_CONFIG_KEYS:
+        return int(value)
+    if normalized_key in BOOLEAN_CONFIG_KEYS:
+        normalized = str(value).strip().lower()
+        if normalized not in ['true', 'false', '1', '0', 'yes', 'no', 'on', 'off']:
+            raise ValueError(f"Invalid boolean value for {normalized_key}")
+        return normalized in ['true', '1', 'yes', 'on']
+    if normalized_key == 'AI_BACKEND':
+        backend = str(value).strip().lower()
+        if backend not in ['ollama', 'openai']:
+            raise ValueError("AI_BACKEND must be 'ollama' or 'openai'")
+        return backend
+    return value
+
+
+def apply_config_update(key, value, persist=True):
+    normalized_key = key.upper().strip()
+    if normalized_key not in ALLOWED_CONFIG_KEYS:
+        raise KeyError(normalized_key)
+
+    typed_value = _coerce_config_value(normalized_key, value)
+    setattr(config, normalized_key, typed_value)
+    if persist:
+        update_env_file(normalized_key, str(value), env_path=get_env_path())
+    return typed_value
+
+
+def get_missing_onboarding_keys():
+    missing = []
+    for key in ['TELEGRAM_BOT_TOKEN', 'CRON_NOTIFY_USER_ID']:
+        value = getattr(config, key, '')
+        if is_placeholder_value(value):
+            missing.append(key)
+
+    backend = str(getattr(config, 'AI_BACKEND', 'ollama')).strip().lower()
+    if backend == 'openai' and is_placeholder_value(getattr(config, 'OPENAI_API_KEY', '')):
+        missing.append('OPENAI_API_KEY')
+
+    return missing
+
+
+def get_onboarding_script_path():
+    root = get_app_root()
+    primary = os.path.join(root, 'scripts', 'onboarding.sh')
+    fallback = os.path.join(root, 'scripts', 'setup_env.sh')
+    if os.path.exists(primary):
+        return primary
+    if os.path.exists(fallback):
+        return fallback
+    return None
+
+
+def run_onboarding_script():
+    script_path = get_onboarding_script_path()
+    if not script_path:
+        print("❌ Onboarding script not found. Expected scripts/onboarding.sh")
+        return False
+
+    print(f"🚀 Running onboarding script: {script_path}")
+    try:
+        subprocess.run(['bash', script_path], check=True)
+        _reload_runtime_config()
+        missing = get_missing_onboarding_keys()
+        if missing:
+            print(f"❌ Onboarding incomplete. Missing: {', '.join(missing)}")
+            return False
+        return True
+    except subprocess.CalledProcessError as exc:
+        print(f"❌ Onboarding script failed: {exc}")
+        return False
+
+
+def ensure_runtime_onboarding():
+    missing = get_missing_onboarding_keys()
+    if not missing:
+        return True
+
+    script_path = get_onboarding_script_path()
+    if not sys.stdin.isatty():
+        if script_path:
+            logger.error(f"Missing required config: {missing}. Run 'bash {script_path}' or './pybot onboard' in interactive shell.")
+        else:
+            logger.error(f"Missing required config: {missing}. Run './pybot onboard' in interactive shell.")
+        return False
+
+    print(f"Missing required config: {', '.join(missing)}")
+    return run_onboarding_script()
+
+
+def run_gateway_cli(args):
+    action = args.gateway_action
+    if action == 'list':
+        for key in ALLOWED_CONFIG_KEYS:
+            print(f"{key}={_mask_value(key, str(getattr(config, key, '')))}")
+        return 0
+
+    if action == 'doctor':
+        missing = get_missing_onboarding_keys()
+        if missing:
+            print(f"❌ Missing required config: {', '.join(missing)}")
+            return 1
+        print("✅ Required onboarding config looks good.")
+        return 0
+
+    key = (args.key or '').upper()
+    if key not in ALLOWED_CONFIG_KEYS:
+        print(f"❌ Invalid config key: {key}")
+        return 1
+
+    if action == 'get':
+        value = str(getattr(config, key, ''))
+        print(f"{key}={_mask_value(key, value)}")
+        return 0
+
+    if action == 'set':
+        try:
+            typed_value = apply_config_update(key, args.value)
+            if key in ['DISCORD_BOT_TOKEN', 'DISCORD_ALLOWED_CHANNEL_IDS']:
+                ensure_discord_bridge_running()
+            print(f"✅ Updated {key}={_mask_value(key, str(typed_value))}")
+            return 0
+        except Exception as exc:
+            print(f"❌ Failed to update config: {exc}")
+            return 1
+
+    print("❌ Unknown gateway action")
+    return 1
+
+
+def handle_cli_entrypoint():
+    parser = argparse.ArgumentParser(description='PyBot runtime and configuration manager')
+    subparsers = parser.add_subparsers(dest='command')
+
+    subparsers.add_parser('onboard', help='Run first-time onboarding wizard')
+
+    gateway_parser = subparsers.add_parser('gateway', help='Manage configuration from command line')
+    gateway_subparsers = gateway_parser.add_subparsers(dest='gateway_action', required=True)
+    gateway_subparsers.add_parser('list', help='List supported config keys and current values')
+    gateway_subparsers.add_parser('doctor', help='Validate required onboarding config')
+
+    get_parser = gateway_subparsers.add_parser('get', help='Get a single config value')
+    get_parser.add_argument('key', help='Config key')
+
+    set_parser = gateway_subparsers.add_parser('set', help='Set a single config value')
+    set_parser.add_argument('key', help='Config key')
+    set_parser.add_argument('value', help='Config value')
+
+    args = parser.parse_args()
+    if not args.command:
+        return None
+
+    if args.command == 'onboard':
+        return 0 if run_onboarding_script() else 1
+
+    if args.command == 'gateway':
+        return run_gateway_cli(args)
+
+    return 0
 
 # Cache for identity to avoid reading file on every request
 _identity_cache = None
@@ -1903,39 +2173,12 @@ async def setconfig_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     key = context.args[0].upper()
     value = ' '.join(context.args[1:])
     
-    # List of allowed config keys (for security)
-    allowed_keys = [
-        'AI_BACKEND', 'OLLAMA_MODEL', 'OLLAMA_URL', 'OPENAI_MODEL',
-        'CHAT_HISTORY_LIMIT', 'DEFAULT_CITY', 'DEFAULT_COUNTRY_CODE',
-        'GMAIL_EMAIL', 'NEWSAPI_KEY', 'OPENWEATHER_API_KEY',
-        'DISCORD_BOT_TOKEN', 'DISCORD_ALLOWED_CHANNEL_IDS',
-        'WHATSAPP_TWILIO_ACCOUNT_SID', 'WHATSAPP_TWILIO_AUTH_TOKEN',
-        'WHATSAPP_TWILIO_NUMBER', 'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
-        'TRELLO_API_KEY', 'TRELLO_TOKEN',
-        'RAG_ENABLED', 'RAG_KB_DIR', 'RAG_TOP_K', 'RAG_CHUNK_SIZE', 'RAG_MAX_CONTEXT_CHARS'
-    ]
-    
-    if key not in allowed_keys:
+    if key not in ALLOWED_CONFIG_KEYS:
         await update.message.reply_text(f"❌ Invalid config key: {key}\n\nUse /setconfig without arguments to see available keys.")
         return
     
     try:
-        # Type-safe updates for known numeric keys
-        typed_value = value
-        if key in ['CHAT_HISTORY_LIMIT', 'RAG_TOP_K', 'RAG_CHUNK_SIZE', 'RAG_MAX_CONTEXT_CHARS']:
-            typed_value = int(value)
-        elif key == 'RAG_ENABLED':
-            normalized = value.strip().lower()
-            if normalized not in ['true', 'false', '1', '0', 'yes', 'no', 'on', 'off']:
-                await update.message.reply_text("❌ Invalid value for RAG_ENABLED. Use true/false.")
-                return
-            typed_value = normalized in ['true', '1', 'yes', 'on']
-
-        # Update the config module
-        setattr(config, key, typed_value)
-        
-        # Update .env file
-        update_env_file(key, value)
+        typed_value = apply_config_update(key, value)
 
         if key in ['DISCORD_BOT_TOKEN', 'DISCORD_ALLOWED_CHANNEL_IDS']:
             ensure_discord_bridge_running()
@@ -1952,6 +2195,100 @@ async def setconfig_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error setting config: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def gateway_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /gateway command."""
+    if not is_user_allowed(update.effective_user.id):
+        await update.message.reply_text("You are not authorized to use this bot.")
+        return
+
+    args = context.args or []
+    if not args:
+        help_text = (
+            "🛡️ <b>Gateway Commands</b>\n\n"
+            "<b>Usage:</b>\n"
+            "• <code>/gateway list</code>\n"
+            "• <code>/gateway get KEY</code>\n"
+            "• <code>/gateway set KEY VALUE</code>\n"
+            "• <code>/onboard</code> (show onboarding status)\n\n"
+            "You can also use <code>/setconfig KEY VALUE</code>."
+        )
+        await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
+        return
+
+    action = args[0].lower()
+    if action == 'list':
+        lines = ["🛡️ <b>Gateway Config Keys</b>"]
+        for key in ALLOWED_CONFIG_KEYS:
+            current = str(getattr(config, key, ''))
+            lines.append(f"• <code>{key}</code> = <code>{html.escape(_mask_value(key, current))}</code>")
+        await send_html_in_chunks(update.message, "\n".join(lines), chunk_size=3200)
+        return
+
+    if action == 'get':
+        if len(args) < 2:
+            await update.message.reply_text("Usage: /gateway get KEY")
+            return
+        key = args[1].upper()
+        if key not in ALLOWED_CONFIG_KEYS:
+            await update.message.reply_text(f"❌ Invalid config key: {key}")
+            return
+        value = str(getattr(config, key, ''))
+        await update.message.reply_text(
+            f"<b>{key}</b> = <code>{html.escape(_mask_value(key, value))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if action == 'set':
+        if len(args) < 3:
+            await update.message.reply_text("Usage: /gateway set KEY VALUE")
+            return
+        key = args[1].upper()
+        value = ' '.join(args[2:])
+        try:
+            typed_value = apply_config_update(key, value)
+            if key in ['DISCORD_BOT_TOKEN', 'DISCORD_ALLOWED_CHANNEL_IDS']:
+                ensure_discord_bridge_running()
+            await update.message.reply_text(
+                f"✅ <b>Gateway Updated</b>\n\n<code>{key}</code> = <code>{html.escape(_mask_value(key, str(typed_value)))}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        except KeyError:
+            await update.message.reply_text(f"❌ Invalid config key: {key}")
+            return
+        except Exception as exc:
+            await update.message.reply_text(f"❌ Failed to update config: {exc}")
+            return
+
+    await update.message.reply_text("Unknown gateway action. Use /gateway for help.")
+
+
+async def onboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /onboard command - show onboarding readiness and missing keys."""
+    if not is_user_allowed(update.effective_user.id):
+        await update.message.reply_text("You are not authorized to use this bot.")
+        return
+
+    missing = get_missing_onboarding_keys()
+    if not missing:
+        await update.message.reply_text(
+            "✅ Onboarding looks complete.\nUse /gateway list or /setconfig to edit settings.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    missing_items = "\n".join([f"• <code>{key}</code>" for key in missing])
+    message = (
+        "⚠️ <b>Onboarding Incomplete</b>\n\n"
+        "Missing required configuration:\n"
+        f"{missing_items}\n\n"
+        "Update from chat with <code>/gateway set KEY VALUE</code> or <code>/setconfig KEY VALUE</code>.\n"
+        "From CLI/binary: <code>./pybot onboard</code>"
+    )
+    await update.message.reply_text(message, parse_mode=ParseMode.HTML)
 
 async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show Ai Assistant-like power features available in chat"""
@@ -2143,9 +2480,9 @@ def interpret_advanced_nl_request(text):
     """Interpret Assistant-like natural language tool requests."""
     return advanced_features.interpret_advanced_nl_request(text)
 
-def update_env_file(key, value):
-    """Update or add a key-value pair in .env file"""
-    advanced_features.update_env_file(key, value)
+def update_env_file(key, value, env_path='.env'):
+    """Update or add a key-value pair in .env file."""
+    advanced_features.update_env_file(key, value, env_path=env_path)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /status command - show comprehensive bot status"""
@@ -2818,21 +3155,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if action == "setconfig":
                 key = advanced_request.get("key", "")
                 value = advanced_request.get("value", "")
-                allowed_keys = [
-                    'AI_BACKEND', 'OLLAMA_MODEL', 'OLLAMA_URL', 'OPENAI_MODEL',
-                    'CHAT_HISTORY_LIMIT', 'DEFAULT_CITY', 'DEFAULT_COUNTRY_CODE',
-                    'GMAIL_EMAIL', 'NEWSAPI_KEY', 'OPENWEATHER_API_KEY',
-                    'DISCORD_BOT_TOKEN', 'DISCORD_ALLOWED_CHANNEL_IDS',
-                    'WHATSAPP_TWILIO_ACCOUNT_SID', 'WHATSAPP_TWILIO_AUTH_TOKEN',
-                    'WHATSAPP_TWILIO_NUMBER', 'WHATSAPP_WEBHOOK_VERIFY_TOKEN'
-                ]
-                if key not in allowed_keys:
+                if key not in ALLOWED_CONFIG_KEYS:
                     await update.message.reply_text(f"❌ Invalid config key: {key}")
                     return
                 try:
-                    typed_value = int(value) if key == 'CHAT_HISTORY_LIMIT' else value
-                    setattr(config, key, typed_value)
-                    update_env_file(key, value)
+                    typed_value = apply_config_update(key, value)
 
                     if key in ['DISCORD_BOT_TOKEN', 'DISCORD_ALLOWED_CHANNEL_IDS']:
                         ensure_discord_bridge_running()
@@ -3606,6 +3933,8 @@ async def setup_bot_commands(application):
         BotCommand("deletelearned", "Delete a single learned pattern by number"),
         BotCommand("config", "View current configuration settings"),
         BotCommand("setconfig", "Change configuration (key value)"),
+        BotCommand("gateway", "config gateway commands"),
+        BotCommand("onboard", "Show onboarding status and required setup"),
         BotCommand("readfile", "Read a file from project"),
         BotCommand("writefile", "Write content to a file"),
         BotCommand("listfiles", "List files in directory"),
@@ -3627,6 +3956,10 @@ async def setup_bot_commands(application):
 # ---------- Main ----------
 def main():
     global bot_instance, discord_thread
+
+    if not ensure_runtime_onboarding():
+        logger.error("Onboarding/config validation failed. Exiting.")
+        return
     
     # Start Flask in a background thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
@@ -3655,6 +3988,8 @@ def main():
     app.add_handler(CommandHandler("clearlearned", clearlearned_command))
     app.add_handler(CommandHandler("config", config_command))
     app.add_handler(CommandHandler("setconfig", setconfig_command))
+    app.add_handler(CommandHandler("gateway", gateway_command))
+    app.add_handler(CommandHandler("onboard", onboard_command))
     # File operations
     app.add_handler(CommandHandler("readfile", readfile_command))
     app.add_handler(CommandHandler("writefile", writefile_command))
@@ -3691,4 +4026,8 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    cli_exit_code = handle_cli_entrypoint()
+    if cli_exit_code is None:
+        main()
+    else:
+        sys.exit(cli_exit_code)
