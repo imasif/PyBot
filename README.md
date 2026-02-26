@@ -58,6 +58,8 @@ A powerful Telegram-based AI personal assistant with **19 core features** includ
 
 ## 🚀 Quick Start
 
+For full setup + binary build instructions, see [INSTALL.md](INSTALL.md).
+
 ### Prerequisites
 - Python 3.12+
 - Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
