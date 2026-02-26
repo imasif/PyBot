@@ -5,14 +5,30 @@
   "class": "TrelloService",
   "description": "Manage Trello boards, lists, and cards via the Trello REST API.",
   "commands": [
-    "list_boards",
-    "list_lists",
-    "list_cards",
+    "archive_card",
     "create_card",
-    "move_card",
-    "archive_card"
+    "detect_request",
+    "handle_request",
+    "list_boards",
+    "list_cards",
+    "list_lists",
+    "move_card"
   ],
-  "keywords": ["trello", "board", "boards", "list", "lists", "card", "cards", "kanban"],
+  "keywords": [
+    "trello",
+    "board",
+    "boards",
+    "list",
+    "lists",
+    "card",
+    "cards",
+    "kanban"
+  ],
+  "required_config": [
+    "TRELLO_API_KEY",
+    "TRELLO_TOKEN"
+  ],
+  "status_label": "Trello",
   "enabled": true,
   "instructions_file": "instructions.md"
 }

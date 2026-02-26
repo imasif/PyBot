@@ -4,8 +4,20 @@
   "module": "services.info_search",
   "class": "InfoSearchService",
   "description": "Handles DuckDuckGo and Wikipedia lookups and detects when the user means to search the web.",
-  "commands": ["detect_search_request", "search_web", "detect_wikipedia_request", "search_wikipedia"],
-  "keywords": ["search", "duckduckgo", "wikipedia", "lookup", "who is", "what is"],
+  "commands": [
+    "detect_search_request",
+    "detect_wikipedia_request",
+    "search_web",
+    "search_wikipedia"
+  ],
+  "keywords": [
+    "search",
+    "duckduckgo",
+    "wikipedia",
+    "lookup",
+    "who is",
+    "what is"
+  ],
   "enabled": true,
   "instructions_file": "instructions.md"
 }

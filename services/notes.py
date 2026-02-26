@@ -110,3 +110,38 @@ If the user didn't specify a title, create a short one from the content.
             result += f"**#{note_id}** - {title}\n{preview}\n\n"
 
         return result
+
+    def handle_interaction(
+        self,
+        text,
+        user_id,
+        nlu_intent=None,
+        check_learned_patterns=None,
+        learn_from_interaction=None,
+        ask_ollama=None,
+        **_kwargs,
+    ):
+        note_detection = self.detect_request(
+            text,
+            user_id=user_id,
+            check_learned_patterns=check_learned_patterns,
+            learn_from_interaction=learn_from_interaction,
+        )
+        if not note_detection:
+            return None
+
+        action = note_detection.get('action')
+        if action == 'create':
+            if not ask_ollama:
+                reply = "❌ Notes service is not available right now."
+            else:
+                reply = self.create_note(text, user_id, ask_ollama)
+        elif action == 'list':
+            reply = self.list_notes(user_id)
+        elif action == 'search':
+            query = note_detection.get('query')
+            reply = self.search_notes(query, user_id)
+        else:
+            reply = "❌ Unknown note action"
+
+        return {'handled': True, 'reply': reply, 'parse_mode': 'HTML'}

@@ -30,6 +30,12 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 # Performance Settings
 CHAT_HISTORY_LIMIT = int(os.getenv("CHAT_HISTORY_LIMIT", "5"))  # Number of previous messages to remember
 
+# Skill metadata auto-sync settings
+raw_auto_sync_skill_metadata = os.getenv("AUTO_SYNC_SKILL_METADATA", "true").strip().lower()
+AUTO_SYNC_SKILL_METADATA = raw_auto_sync_skill_metadata in ["1", "true", "yes", "on"]
+raw_skill_metadata_sync_only_missing = os.getenv("SKILL_METADATA_SYNC_ONLY_MISSING", "false").strip().lower()
+SKILL_METADATA_SYNC_ONLY_MISSING = raw_skill_metadata_sync_only_missing in ["1", "true", "yes", "on"]
+
 # Universal NLU Configuration (semantic intent fallback)
 raw_nlu_enabled = os.getenv("NLU_ENABLED", "true").strip().lower()
 NLU_ENABLED = raw_nlu_enabled in ["1", "true", "yes", "on"]

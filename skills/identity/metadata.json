@@ -4,8 +4,17 @@
   "module": "services.identity",
   "class": "IdentityService",
   "description": "Reads and updates the bot persona stored in identity.md using natural language cues.",
-  "commands": ["process_identity_update", "interpret_identity_request"],
-  "keywords": ["identity", "personality", "name", "traits", "style"],
+  "commands": [
+    "interpret_identity_request",
+    "process_identity_update"
+  ],
+  "keywords": [
+    "identity",
+    "personality",
+    "name",
+    "traits",
+    "style"
+  ],
   "enabled": true,
   "instructions_file": "instructions.md"
 }

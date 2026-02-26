@@ -7,6 +7,48 @@ logger = logging.getLogger(__name__)
 
 
 class CronService:
+    def get_supported_job_types(self):
+        return [
+            ("send_message", "Send a message"),
+            ("custom_command", "Run a command"),
+            ("cleanup", "Cleanup old data"),
+            ("check_email", "Run scheduled email check"),
+        ]
+
+    def get_capability_summary(self):
+        return """Yes! I have powerful scheduling capabilities:
+
+⏰ Cron Job Features:
+• /addjob - Create scheduled tasks
+• /listjobs - View all scheduled jobs
+• /removejob - Delete jobs
+• Natural language: "remind me every day at 9am"
+
+I can schedule:
+• Skill checks
+• Command execution
+• Custom reminders
+• Cleanup tasks"""
+
+    def get_addjob_help_text(self):
+        type_lines = [f"• {job_type} - {description}" for job_type, description in self.get_supported_job_types()]
+        return (
+            "Add a cron job:\n\n"
+            "/addjob <name> <type> <schedule> [params]\n\n"
+            "Types:\n"
+            + "\n".join(type_lines)
+            + "\n\n"
+            "Schedule examples:\n"
+            "• \"every 30 minutes\"\n"
+            "• \"every 1 hour\"\n"
+            "• \"daily at 09:00\"\n"
+            "• \"0 9 * * *\" (cron: 9 AM daily)\n\n"
+            "Examples:\n"
+            "/addjob morning_email check_email \"daily at 08:00\"\n"
+            "/addjob hourly_check check_email \"every 1 hour\"\n"
+            "/addjob reminder send_message \"daily at 12:00\" message=\"Take a break!\"\n"
+        )
+
     def run_custom_command(self, command, timeout=30):
         try:
             logger.info(f"Executing command: {command}")
@@ -40,7 +82,7 @@ class CronService:
         *,
         notify_user_id: str,
         send_message: Callable[..., None],
-        get_unread_emails: Callable[..., str],
+        fetch_scheduled_check_result: Callable[..., str],
         generate_sleep_report: Callable[[str, int], str],
         generate_tracking_report: Callable[[str, str, int], str],
     ) -> None:
@@ -48,8 +90,9 @@ class CronService:
 
         try:
             if job_type == "check_email":
-                result = get_unread_emails()
-                send_message(notify_user_id, f"📧 Scheduled Email Check:\n\n{result}", parse_mode="HTML")
+                target_user_id = params.get("user_id", notify_user_id)
+                result = fetch_scheduled_check_result(str(target_user_id))
+                send_message(target_user_id, f"📧 Scheduled Email Check:\n\n{result}", parse_mode="HTML")
 
             elif job_type == "send_message":
                 message = params.get("message", "Scheduled reminder")

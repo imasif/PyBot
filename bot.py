@@ -31,15 +31,7 @@ from telegram import BotCommand, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from plugin_registry import get_service_instances
-from services.emails import (
-    email_command_help,
-    handle_email_action,
-    handle_email_request,
-    handle_read_email,
-    interpret_email_request,
-    interpret_read_email_request,
-)
+from plugin_registry import get_optional_config_keys, get_plugin_api_status, get_required_config_keys, get_skill, get_skill_definitions, invoke_first_available_method, invoke_service_method, sync_skill_metadata_commands
 from services.nlu import UniversalNLUService
 
 # Initialize database
@@ -53,43 +45,28 @@ logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler()
 bot_instance = None
 discord_thread = None
-service_instances = get_service_instances()
-email_service = service_instances.get("email")
-calculation_service = service_instances.get("calculation")
-info_search_service = service_instances.get("info_search")
-news_service = service_instances.get("news")
-calendar_service = service_instances.get("calendar")
-notes_service = service_instances.get("notes")
-shopping_service = service_instances.get("shopping")
-timer_service = service_instances.get("timer")
-weather_service = service_instances.get("weather")
-cron_service = service_instances.get("cron")
-browser_service = service_instances.get("browser")
-identity_service = service_instances.get("identity")
-cron_nl_service = service_instances.get("cron_nl")
-tracking_service = service_instances.get("tracking")
-trello_service = service_instances.get("trello")
 nlu_service = UniversalNLUService()
 
-ALLOWED_CONFIG_KEYS = [
+
+def call_service(service_name, method_name, *args, default=None, **kwargs):
+    return invoke_service_method(service_name, method_name, *args, default=default, **kwargs)
+
+CORE_ALLOWED_CONFIG_KEYS = [
     'TELEGRAM_BOT_TOKEN', 'CRON_NOTIFY_USER_ID',
     'DISCORD_BOT_TOKEN', 'DISCORD_ALLOWED_CHANNEL_IDS',
     'WHATSAPP_TWILIO_ACCOUNT_SID', 'WHATSAPP_TWILIO_AUTH_TOKEN',
     'WHATSAPP_TWILIO_NUMBER', 'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
     'AI_BACKEND', 'OLLAMA_URL', 'OLLAMA_MODEL',
     'CHAT_HISTORY_LIMIT',
+    'AUTO_SYNC_SKILL_METADATA', 'SKILL_METADATA_SYNC_ONLY_MISSING',
     'NLU_ENABLED', 'NLU_MODEL', 'NLU_MIN_CONFIDENCE',
     'RAG_ENABLED', 'RAG_KB_DIR', 'RAG_CHUNK_SIZE', 'RAG_TOP_K', 'RAG_MAX_CONTEXT_CHARS',
     'OPENAI_API_KEY', 'OPENAI_MODEL',
-    'GMAIL_EMAIL', 'GMAIL_APP_PASSWORD',
-    'OPENWEATHER_API_KEY', 'DEFAULT_CITY', 'DEFAULT_COUNTRY_CODE',
-    'NEWSAPI_KEY',
-    'TRELLO_API_KEY', 'TRELLO_TOKEN',
     'DASHBOARD_JWT_SECRET', 'DASHBOARD_JWT_ALGORITHM',
     'DASHBOARD_JWT_EXPIRE_HOURS', 'DASHBOARD_AUTO_REFRESH_SECONDS',
 ]
 NUMERIC_CONFIG_KEYS = {'CHAT_HISTORY_LIMIT', 'NLU_MIN_CONFIDENCE', 'RAG_TOP_K', 'RAG_CHUNK_SIZE', 'RAG_MAX_CONTEXT_CHARS', 'DASHBOARD_JWT_EXPIRE_HOURS', 'DASHBOARD_AUTO_REFRESH_SECONDS'}
-BOOLEAN_CONFIG_KEYS = {'NLU_ENABLED', 'RAG_ENABLED'}
+BOOLEAN_CONFIG_KEYS = {'NLU_ENABLED', 'RAG_ENABLED', 'AUTO_SYNC_SKILL_METADATA', 'SKILL_METADATA_SYNC_ONLY_MISSING'}
 FLOAT_CONFIG_KEYS = {'NLU_MIN_CONFIDENCE'}
 SENSITIVE_CONFIG_KEYS = {
     'TELEGRAM_BOT_TOKEN', 'OPENAI_API_KEY', 'OPENWEATHER_API_KEY', 'NEWSAPI_KEY',
@@ -97,6 +74,133 @@ SENSITIVE_CONFIG_KEYS = {
     'WHATSAPP_TWILIO_ACCOUNT_SID', 'TRELLO_API_KEY', 'TRELLO_TOKEN', 'DASHBOARD_JWT_SECRET'
 }
 REQUIRED_ONBOARD_KEYS = {'TELEGRAM_BOT_TOKEN', 'CRON_NOTIFY_USER_ID', 'AI_BACKEND'}
+
+
+def get_runtime_allowed_config_keys():
+    dynamic_keys = get_required_config_keys()
+    optional_keys = get_optional_config_keys()
+
+    merged = []
+    seen = set()
+    for key in [*CORE_ALLOWED_CONFIG_KEYS, *optional_keys, *dynamic_keys]:
+        normalized = str(key).strip().upper()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        merged.append(normalized)
+    return merged
+
+
+def is_runtime_allowed_config_key(key):
+    return str(key).strip().upper() in set(get_runtime_allowed_config_keys())
+
+
+def _matches_skill_keywords(skill_slug: str, text: str) -> bool:
+    candidate = (text or '').lower().strip()
+    slug = (skill_slug or '').strip()
+    if not candidate or not slug:
+        return False
+
+    skill = get_skill(slug)
+    keywords = [str(item).lower().strip() for item in ((skill.keywords if skill else []) or []) if str(item).strip()]
+    if not keywords:
+        return False
+
+    return any(keyword in candidate for keyword in keywords)
+
+
+def _matched_skill_slugs(text: str):
+    candidate = (text or '').lower().strip()
+    if not candidate:
+        return []
+
+    matched = []
+    for slug, skill in get_skill_definitions().items():
+        if not getattr(skill, 'enabled', False):
+            continue
+        keywords = [str(item).lower().strip() for item in ((skill.keywords if skill else []) or []) if str(item).strip()]
+        if keywords and any(keyword in candidate for keyword in keywords):
+            matched.append(slug)
+    return matched
+
+
+def _matches_any_skill_keywords(text: str, excluded_slugs=None) -> bool:
+    excluded = set(str(slug).strip().lower() for slug in (excluded_slugs or []) if str(slug).strip())
+    for slug in _matched_skill_slugs(text):
+        if slug.lower() not in excluded:
+            return True
+    return False
+
+
+def _build_dynamic_capabilities_text() -> str:
+    enabled_skills = [skill for skill in get_skill_definitions().values() if skill.enabled]
+    enabled_skills.sort(key=lambda skill: (skill.name or skill.slug).lower())
+
+    lines = [
+        "I'm your personal AI assistant with these capabilities:",
+        "",
+        "💬 AI Chat:",
+        "  • Talk naturally and I'll route your request to the right skill",
+        "",
+        "🧩 Enabled Skills:",
+    ]
+
+    if enabled_skills:
+        for skill in enabled_skills:
+            skill_name = skill.name or skill.slug.replace('_', ' ').title()
+            description = (skill.description or "Available").strip()
+            lines.append(f"  • {skill_name} — {description}")
+    else:
+        lines.append("  • No skills are currently enabled")
+
+    lines.extend([
+        "",
+        "🛠️ Core Bot Features:",
+        "  • Scheduling & reminders (/addjob, /listjobs, /removejob)",
+        "  • Command execution (/run)",
+        "  • Runtime config management (/config, /setconfig, /gateway)",
+        "",
+        "Use /start to see all commands.",
+    ])
+    return "\n".join(lines)
+
+
+def _build_dynamic_start_help() -> str:
+    bot_name = get_bot_name()
+    enabled_skills = [skill for skill in get_skill_definitions().values() if skill.enabled]
+    enabled_skills.sort(key=lambda skill: (skill.name or skill.slug).lower())
+
+    lines = [
+        f"Hi! I'm {bot_name}, your AI assistant.",
+        "",
+        "Enabled skills:",
+    ]
+
+    if enabled_skills:
+        for skill in enabled_skills:
+            skill_name = skill.name or skill.slug.replace('_', ' ').title()
+            description = (skill.description or "Available").strip()
+            lines.append(f"- {skill_name}: {description}")
+    else:
+        lines.append("- No skills currently enabled")
+
+    lines.extend([
+        "",
+        "Core commands:",
+        "- /status : bot health and runtime overview",
+        "- /config : show current runtime config",
+        "- /setconfig KEY VALUE : update config",
+        "- /gateway list|get|set : gateway config operations",
+        "- /addjob, /listjobs, /removejob : scheduling",
+        "- /run <command> : execute shell command",
+        "- /tools : advanced tool commands",
+        "",
+        "You can also talk naturally, for example:",
+        "- check my messages",
+        "- remind me everyday at 4:30 am",
+        "- show my jobs",
+    ])
+    return "\n".join(lines)
 
 
 def get_app_root():
@@ -200,7 +304,7 @@ def _coerce_config_value(key, value):
 
 def apply_config_update(key, value, persist=True):
     normalized_key = key.upper().strip()
-    if normalized_key not in ALLOWED_CONFIG_KEYS:
+    if not is_runtime_allowed_config_key(normalized_key):
         raise KeyError(normalized_key)
 
     typed_value = _coerce_config_value(normalized_key, value)
@@ -275,7 +379,7 @@ def ensure_runtime_onboarding():
 def run_gateway_cli(args):
     action = args.gateway_action
     if action == 'list':
-        for key in ALLOWED_CONFIG_KEYS:
+        for key in get_runtime_allowed_config_keys():
             print(f"{key}={_mask_value(key, str(getattr(config, key, '')))}")
         return 0
 
@@ -288,7 +392,7 @@ def run_gateway_cli(args):
         return 0
 
     key = (args.key or '').upper()
-    if key not in ALLOWED_CONFIG_KEYS:
+    if not is_runtime_allowed_config_key(key):
         print(f"❌ Invalid config key: {key}")
         return 1
 
@@ -614,16 +718,19 @@ def send_telegram_message(user_id, message, parse_mode=ParseMode.MARKDOWN):
 
 def execute_cron_job(job_type, params):
     """Execute a cron job based on its type"""
-    cron_service.execute_cron_job(
+    call_service(
+        'cron',
+        'execute_cron_job',
         job_type,
         params,
         notify_user_id=config.CRON_NOTIFY_USER_ID,
         send_message=send_telegram_message,
-        get_unread_emails=lambda: handle_email_action(
-            "unread",
+        fetch_scheduled_check_result=lambda target_user_id: invoke_first_available_method(
+            'handle_command_action',
+            'unread',
             [],
-            email_service,
-            config.CRON_NOTIFY_USER_ID,
+            str(target_user_id),
+            default="This service is not available right now. Restart the bot so it can initialize.",
         ),
         generate_sleep_report=generate_sleep_report,
         generate_tracking_report=generate_tracking_report,
@@ -631,12 +738,24 @@ def execute_cron_job(job_type, params):
 
 def run_custom_command(command, timeout=30):
     """Execute a custom shell command and return the output"""
-    return cron_service.run_custom_command(command, timeout=timeout)
+    return call_service(
+        'cron',
+        'run_custom_command',
+        command,
+        timeout=timeout,
+        default="❌ Cron service is not available right now.",
+    )
 
 # ---------- Browser Automation Functions ----------
 def automate_browser(action_type, **kwargs):
     """Automate browser actions using Selenium"""
-    return browser_service.automate(action_type, **kwargs)
+    return call_service(
+        'browser',
+        'automate',
+        action_type,
+        default="❌ Browser service is not available right now.",
+        **kwargs,
+    )
 
 def auto_resolve_common_queries(text):
     """Auto-resolve common system queries with immediate command execution"""
@@ -685,63 +804,6 @@ def auto_resolve_common_queries(text):
     
     return None
 
-# ---------- Weather Functions ----------
-def get_weather(city=None, country_code=None, style='standard'):
-    """Get weather information from WeatherService."""
-    if weather_service is None:
-        return "❌ Weather service is unavailable."
-    return weather_service.get_weather_response(city=city, country_code=country_code, style=style)
-
-def detect_weather_request(text, user_id=None):
-    """Detect if user is asking for weather information."""
-    if weather_service is None:
-        return None
-    return weather_service.detect_weather_request(
-        text,
-        user_id=user_id,
-        get_user_context=lambda uid, key: database.get_user_context(uid, key),
-        save_user_context=lambda uid, key, value: database.save_user_context(uid, key, value),
-        check_learned_patterns=check_learned_patterns,
-        learn_from_interaction=learn_from_interaction,
-        ask_ollama=ask_ollama,
-    )
-
-
-def detect_weather_style_learning_request(text):
-    """Detect requests to learn preferred weather response style."""
-    if weather_service is None:
-        return None
-    return weather_service.detect_weather_style_learning_request(text)
-
-
-def detect_location_learning_request(text):
-    """Detect explicit location preference learning requests from natural language."""
-    if weather_service is None:
-        return None
-    return weather_service.detect_location_learning_request(text, ask_ollama=ask_ollama)
-
-# ---------- Notes Functions ----------
-def detect_note_request(text, user_id=None):
-    """Detect if user wants to create, read, search, or delete notes"""
-    return notes_service.detect_request(
-        text,
-        user_id=user_id,
-        check_learned_patterns=check_learned_patterns,
-        learn_from_interaction=learn_from_interaction,
-    )
-
-def handle_note_create(text, user_id):
-    """Create a new note using AI to extract title and content"""
-    return notes_service.create_note(text, user_id, ask_ollama)
-
-def handle_note_list(user_id):
-    """List recent notes"""
-    return notes_service.list_notes(user_id)
-
-def handle_note_search(query, user_id):
-    """Search notes"""
-    return notes_service.search_notes(query, user_id)
-
 # ---------- Reminders Functions ----------
 # NOTE: Reminders are now merged into cron jobs system
 # One-time reminders are created as cron jobs with specific datetime and run_once=True
@@ -749,93 +811,121 @@ def handle_note_search(query, user_id):
 # ---------- Shopping List Functions ----------
 def detect_shopping_request(text, user_id=None):
     """Detect shopping list requests"""
-    return shopping_service.detect_request(
+    return call_service(
+        'shopping',
+        'detect_request',
         text,
         user_id=user_id,
         check_learned_patterns=check_learned_patterns,
         learn_from_interaction=learn_from_interaction,
+        default=None,
     )
 
 def handle_shopping_add(items_text, user_id):
     """Add items to shopping list"""
-    return shopping_service.add_items(items_text, user_id)
+    return call_service('shopping', 'add_items', items_text, user_id, default="❌ Shopping service is not available right now.")
 
 def handle_shopping_list(user_id):
     """Show shopping list"""
-    return shopping_service.list_items(user_id)
+    return call_service('shopping', 'list_items', user_id, default="❌ Shopping service is not available right now.")
 
 def handle_shopping_clear(user_id):
     """Clear purchased items from shopping list"""
-    return shopping_service.clear_items(user_id)
+    return call_service('shopping', 'clear_items', user_id, default="❌ Shopping service is not available right now.")
 
 # ---------- Timer Functions ----------
 def detect_timer_request(text, user_id=None):
     """Detect timer requests"""
-    return timer_service.detect_request(
+    return call_service(
+        'timer',
+        'detect_request',
         text,
         user_id=user_id,
         check_learned_patterns=check_learned_patterns,
         learn_from_interaction=learn_from_interaction,
+        default=None,
     )
 
 def handle_timer_create(duration_text, user_id):
     """Create a timer"""
-    return timer_service.create_timer(duration_text, user_id)
+    return call_service('timer', 'create_timer', duration_text, user_id, default="❌ Timer service is not available right now.")
 
 def handle_timer_list(user_id):
     """List active timers"""
-    return timer_service.list_timers(user_id)
+    return call_service('timer', 'list_timers', user_id, default="❌ Timer service is not available right now.")
 
 # ---------- Web Search Functions ----------
 def detect_search_request(text, user_id=None):
     """Detect if user wants to search the web"""
-    return info_search_service.detect_search_request(
+    return call_service(
+        'info_search',
+        'detect_search_request',
         text,
         user_id=user_id,
         check_learned_patterns=check_learned_patterns,
         learn_from_interaction=learn_from_interaction,
+        default=None,
     )
 
 def search_web(query):
     """Search the web using DuckDuckGo"""
-    return info_search_service.search_web(query)
+    return call_service('info_search', 'search_web', query, default="❌ Search service is not available right now.")
 
 # ---------- Wikipedia Functions ----------
 def detect_wikipedia_request(text, user_id=None):
     """Detect if user wants Wikipedia information"""
-    return info_search_service.detect_wikipedia_request(
+    return call_service(
+        'info_search',
+        'detect_wikipedia_request',
         text,
         user_id=user_id,
         check_learned_patterns=check_learned_patterns,
         learn_from_interaction=learn_from_interaction,
+        default=None,
     )
 
 def search_wikipedia(query):
     """Search Wikipedia for information"""
-    return info_search_service.search_wikipedia(query)
+    return call_service('info_search', 'search_wikipedia', query, default="❌ Search service is not available right now.")
 
 # ---------- Unit Conversion & Calculator Functions ----------
 def detect_calculation_request(text):
     """Detect math calculations and unit conversions"""
-    return calculation_service.detect_request(text)
+    return call_service('calculation', 'detect_request', text, default=False)
 
 def handle_calculation(expression):
     """Handle calculations and unit conversions using AI"""
-    return calculation_service.handle(expression, ask_ollama)
+    return call_service(
+        'calculation',
+        'handle',
+        expression,
+        ask_ollama,
+        default="❌ Calculation service is not available right now.",
+    )
 
 # ---------- News Functions ----------
 def detect_news_request(text, user_id=None):
     """Detect if user wants news"""
-    return news_service.detect_request(
+    return call_service(
+        'news',
+        'detect_request',
         text,
         user_id=user_id,
         check_learned_patterns=check_learned_patterns,
         learn_from_interaction=learn_from_interaction,
+        default=None,
     )
 
 def get_news(topic=None, limit=5):
     """Get news headlines using NewsAPI"""
-    return news_service.get_news(config.NEWSAPI_KEY, topic=topic, limit=limit)
+    return call_service(
+        'news',
+        'get_news',
+        config.NEWSAPI_KEY,
+        topic=topic,
+        limit=limit,
+        default="❌ News service is not available right now.",
+    )
 
 def build_learned_entries(rows):
     entries = []
@@ -914,7 +1004,16 @@ def is_successful_interaction_result(result_text):
     if not text:
         return False
 
-    failure_markers = ["❌", "error", "failed", "not found", "access denied", "unknown"]
+    failure_markers = [
+        "❌",
+        "error",
+        "failed",
+        "not found",
+        "no such file or directory",
+        "permission denied",
+        "access denied",
+        "unknown",
+    ]
     return not any(marker in text for marker in failure_markers)
 
 
@@ -923,10 +1022,13 @@ def learn_command_like_success(user_id, user_message, learned_intent, result_tex
     if not user_id or not learned_intent:
         return
 
+    normalized_message = (user_message or "").lower().strip()
+    if _matches_any_skill_keywords(normalized_message):
+        return
+
     if result_text is not None and not is_successful_interaction_result(result_text):
         return
 
-    normalized_message = user_message.lower().strip()
     learn_from_interaction(user_id, normalized_message, 'command_like', learned_intent)
 
 def get_personalized_greeting(user_id):
@@ -1016,21 +1118,11 @@ def generate_daily_briefing(user_id):
     current_time = datetime.now().strftime('%I:%M %p')
     current_date = datetime.now().strftime('%A, %B %d, %Y')
     briefing = f"📋 **Daily Briefing - {current_date}**\n🕐 The time is {current_time}\n\n"
-    
-    # Weather
-    briefing += "🌤️ **Weather:**\n"
-    weather_result = get_weather()
-    if "❌" not in weather_result:
-        # Extract just the key info
-        
-        temp_match = re.search(r'Temperature:\*\* (.+?)°C', weather_result)
-        cond_match = re.search(r'Conditions:\*\* (.+?)\n', weather_result)
-        if temp_match and cond_match:
-            briefing += f"{temp_match.group(1)}°C, {cond_match.group(1)}\n\n"
-        else:
-            briefing += weather_result.split('\n')[0] + "\n\n"
-    else:
-        briefing += "Weather unavailable\n\n"
+
+    briefing += invoke_first_available_method(
+        'get_daily_briefing_section',
+        default='',
+    )
     
     # Upcoming scheduled tasks
     jobs = database.get_all_cron_jobs()
@@ -1098,7 +1190,6 @@ Examples for {os_name}:
 - "play love song on youtube" → {{"is_command_request": true, "command": "{url_open_cmd} 'https://www.youtube.com/results?search_query=love+song'", "explanation": "Search and play on YouTube", "confidence": "high"}}
 - "search youtube for tutorial" → {{"is_command_request": true, "command": "{url_open_cmd} 'https://www.youtube.com/results?search_query=tutorial'", "explanation": "Search YouTube", "confidence": "high"}}
 - "open google.com" → {{"is_command_request": true, "command": "{url_open_cmd} 'https://google.com'", "explanation": "Open Google", "confidence": "high"}}
-- "what's the weather?" → {{"is_command_request": false}}
 - "what time is it?" → {{"is_command_request": false}}
 - "what's the date?" → {{"is_command_request": false}}
 - "current time" → {{"is_command_request": false}}
@@ -1121,6 +1212,11 @@ Only return the JSON, nothing else."""
 
     # Pre-process common patterns for speed and reliability
     text_lower = text.lower().strip()
+
+    # Do not treat email-skill intents as shell commands unless user explicitly asks to run a command.
+    explicit_command_terms = ["run", "execute", "shell", "terminal", "command", "bash", "zsh", "cmd", "powershell"]
+    if _matches_any_skill_keywords(text_lower) and not any(term in text_lower for term in explicit_command_terms):
+        return {"is_command_request": False}
 
     # Use learned command-like mappings first
     if user_id:
@@ -1280,31 +1376,46 @@ Only return the JSON, nothing else."""
 
 def process_identity_update(user_request, user_id=None):
     """Use AI to update the bot's identity based on natural language request"""
-    return identity_service.process_identity_update(user_request, user_id, read_identity, ask_ollama)
+    return call_service(
+        'identity',
+        'process_identity_update',
+        user_request,
+        user_id,
+        read_identity,
+        ask_ollama,
+        default="❌ Identity service is not available right now.",
+    )
 
 def detect_tracking_request(text, user_id):
     """Detect and handle generic tracking requests using AI"""
-    return tracking_service.detect_tracking_request(text, user_id, get_ai_response)
+    return call_service('tracking', 'detect_tracking_request', text, user_id, get_ai_response, default=None)
 
 def interpret_tracking_request(text, user_id):
     """Use AI to interpret what the user wants to track"""
-    return tracking_service.interpret_tracking_request(text, user_id, get_ai_response)
+    return call_service('tracking', 'interpret_tracking_request', text, user_id, get_ai_response, default=None)
 
 def interpret_report_request(text, user_id):
     """Use AI to understand what report the user wants"""
-    return tracking_service.interpret_report_request(text, user_id, get_ai_response)
+    return call_service('tracking', 'interpret_report_request', text, user_id, get_ai_response, default=None)
 
 def generate_tracking_report(user_id, category, days=7):
     """Generate a comprehensive report for any tracking category"""
-    return tracking_service.generate_tracking_report(user_id, category, days)
+    return call_service(
+        'tracking',
+        'generate_tracking_report',
+        user_id,
+        category,
+        days,
+        default="❌ Tracking service is not available right now.",
+    )
 
 def detect_sleep_tracking(text, user_id):
     """Detect and handle sleep tracking requests"""
-    return tracking_service.detect_sleep_tracking(text, user_id)
+    return call_service('tracking', 'detect_sleep_tracking', text, user_id, default=None)
 
 def generate_sleep_report(user_id, days=7):
     """Generate a comprehensive sleep report"""
-    return tracking_service.generate_sleep_report(user_id, days)
+    return call_service('tracking', 'generate_sleep_report', user_id, days, default="❌ Tracking service is not available right now.")
 
 def check_capability_question(text, user_id=None):
     """Check if user is asking about bot's capabilities"""
@@ -1359,22 +1470,6 @@ def check_capability_question(text, user_id=None):
         # This will be handled in handle_message with actual user_id
         return "USER_ID_REQUEST"
     
-    # Email capability questions
-    email_questions = ["can you access my email", "can you read my email", "can you check my email",
-                      "do you have access to my email", "can you see my email"]
-    if any(q in text_lower for q in email_questions):
-        return """Yes! I can access your Gmail account. I have these email capabilities:
-
-📧 Email Features:
-• /unread - Check your unread emails
-• /recent - Show recent emails
-• /search <query> - Search your emails
-
-I can also schedule email checks:
-• "remind me to check email every morning at 9am"
-
-To use these features, you need to configure your Gmail credentials in the config file."""
-
     # Command execution questions
     command_questions = ["can you run command", "can you execute command", "can you run shell",
                         "can you execute shell", "do you run system command"]
@@ -1392,79 +1487,31 @@ I understand natural language and will figure out the right command!"""
     schedule_questions = ["can you schedule", "can you set reminder", "can you automate",
                          "do you support cron", "can you run tasks automatically"]
     if any(q in text_lower for q in schedule_questions):
-        return """Yes! I have powerful scheduling capabilities:
+        return call_service('cron', 'get_capability_summary', default="""Yes! I have powerful scheduling capabilities:
 
-⏰ Cron Job Features:
-• /addjob - Create scheduled tasks
-• /listjobs - View all scheduled jobs
-• /removejob - Delete jobs
-• Natural language: "remind me to check email every morning"
+    ⏰ Cron Job Features:
+    • /addjob - Create scheduled tasks
+    • /listjobs - View all scheduled jobs
+    • /removejob - Delete jobs
+    • Natural language: "remind me every day at 9am"
 
-I can schedule:
-• Email checks
-• Command execution
-• Custom reminders
-• Cleanup tasks"""
+    I can schedule:
+    • Skill checks
+    • Command execution
+    • Custom reminders
+    • Cleanup tasks""")
 
     # General capability questions
     what_can_you_do = ["what can you do", "what are your features", "what can you help",
                        "what are your capabilities", "help me"]
     if any(q in text_lower for q in what_can_you_do):
-        return """I'm your personal AI assistant with these capabilities:
-
-💬 AI Chat - Just talk to me naturally!
-
-🌤️ Weather & Information:
-  • Current weather forecasts
-  • Web search (DuckDuckGo)
-  • Wikipedia knowledge
-  • News headlines & topics
-  • Daily briefings
-
-📝 Productivity:
-  • Notes & memos
-  • Timers
-  • Shopping lists
-  • Unit conversions & calculations
-
-📧 Email Management:
-  • Check unread emails
-  • Search your inbox
-  • Read specific emails
-  • Monitor automatically
-
-⏰ Task Scheduling & Reminders:
-  • One-time reminders (e.g., "remind me at 3pm")
-  • Recurring schedules (e.g., "every day at 9am")
-  • Cron job management (create, edit, delete)
-  • Scheduled commands & automation
-  • Time-based alerts
-
-📊 Life Tracking:
-  • Sleep tracking with reports
-  • Exercise, study, mood logging
-  • Custom tracking categories
-  • Automated report generation
-
-🌐 Browser Automation:
-  • Open any URL
-  • YouTube auto-play with ad-skip
-  • Google search
-  • Chrome instance management
-
-🔧 Command Execution:
-  • Run shell commands
-  • Natural language understanding
-  • System info queries (time, date, disk, etc.)
-
-Just talk to me naturally - I'll understand what you need!
-Use /start to see all commands."""
+        return _build_dynamic_capabilities_text()
 
     return None  # Not a capability question
 
 def interpret_identity_request(text):
     """Detect and interpret requests to update bot identity"""
-    return identity_service.interpret_identity_request(text)
+    return call_service('identity', 'interpret_identity_request', text, default=None)
 
 def schedule_job(job):
     """Schedule a single job"""
@@ -1659,18 +1706,18 @@ def load_cron_jobs():
 
 def parse_cron_from_text(text):
     """Parse natural language cron job request using AI"""
-    return cron_nl_service.parse_cron_from_text(text, get_ai_response)
+    return call_service('cron_nl', 'parse_cron_from_text', text, get_ai_response, default=None)
 def create_cron_from_natural_language(text, user_id):
     """Create a cron job from natural language"""
-    return cron_nl_service.create_cron_from_natural_language(text, user_id, get_ai_response, schedule_job)
+    return call_service('cron_nl', 'create_cron_from_natural_language', text, user_id, get_ai_response, schedule_job, default=None)
 
 def manage_cron_job_nl(text, user_id):
     """Manage cron jobs (edit, enable, disable, delete) from natural language"""
-    return cron_nl_service.manage_cron_job_nl(text, user_id, get_ai_response, schedule_job, scheduler)
+    return call_service('cron_nl', 'manage_cron_job_nl', text, user_id, get_ai_response, schedule_job, scheduler, default=None)
 
 def interpret_cron_management(text, user_id):
     """Use AI to interpret cron job management requests"""
-    return cron_nl_service.interpret_cron_management(text, user_id, get_ai_response)
+    return call_service('cron_nl', 'interpret_cron_management', text, user_id, get_ai_response, default=None)
 
 # ---------- Access Control ----------
 def is_user_allowed(user_id):
@@ -1683,87 +1730,38 @@ def is_user_allowed(user_id):
 
 # ---------- Telegram Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = """Hi! I'm Jarvis, your AI assistant. Here's what I can do:
+        help_text = _build_dynamic_start_help()
+        await safe_reply(update.message, help_text)
 
-💬 **Chat with AI**
-  Just talk to me naturally!
-
-📧 **Email Management:**
-  /unread - Check unread emails
-  /recent - Show recent emails  
-  /search <query> - Search emails
-  Say: "show my last 10 emails" or "read email 3"
-
-⏰ **Task Scheduling & Automation:**
-  • Create: "remind me to check email every morning at 9am"
-  • List: "show my jobs" or /listjobs
-  • Edit: "change morning reminder to 8am"
-  • Pause: "disable morning reminder"
-  • Enable: "enable sleep report job"
-  • Delete: "delete hourly check job"
-
-📊 **Life Tracking:**
-  • Sleep: "good night" / "good morning"
-  • Exercise: "worked out for 30 minutes"
-  • Study: "studied for 2 hours"
-  • Anything: "drank 8 cups of water"
-  • Reports: "show my sleep report for last week"
-
-🔧 **System Commands:**
-  Just ask naturally:
-  • "what's the current time?"
-  • "show me the files here"
-  • "how much disk space left?"
-  
-  Or use: /run <command>
-
-🌐 **Browser Automation:**
-  • "play love song on youtube"
-  • "search google for python tutorial"
-
-✉️ **Telegram Messaging:**
-    • /sendto <chat_id> <message>
-    • Example: /sendto 123456789 Hello there
-
-Everything works with natural language - just tell me what you need!"""
-    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
-
-async def unread_emails_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /unread command"""
+async def plugin_command_bridge(update: Update, context: ContextTypes.DEFAULT_TYPE, command_name: str):
     if not is_user_allowed(update.effective_user.id):
         await update.message.reply_text("You are not authorized to use this bot.")
         return
-    
-    user_id = str(update.effective_user.id)
-    await update.message.reply_text("📧 Checking unread emails...")
-    result = handle_email_action("unread", [], email_service, user_id)
-    await send_html_in_chunks(update.message, result)
 
-async def recent_emails_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /recent command"""
-    if not is_user_allowed(update.effective_user.id):
-        await update.message.reply_text("You are not authorized to use this bot.")
-        return
-    
-    user_id = str(update.effective_user.id)
-    await update.message.reply_text("📬 Fetching recent emails...")
-    result = handle_email_action("recent", [], email_service, user_id)
-    await send_html_in_chunks(update.message, result)
+    payload = invoke_first_available_method(
+        'build_command_response',
+        command_name,
+        context.args or [],
+        str(update.effective_user.id),
+        default={
+            'pre_message': None,
+            'reply': 'This service is not available right now. Restart the bot so it can initialize.',
+            'parse_mode': None,
+        },
+    )
 
-async def search_emails_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /search command"""
-    if not is_user_allowed(update.effective_user.id):
-        await update.message.reply_text("You are not authorized to use this bot.")
+    pre_message = (payload or {}).get('pre_message')
+    reply_text = (payload or {}).get('reply', '')
+    parse_mode_key = (payload or {}).get('parse_mode')
+
+    if pre_message:
+        await update.message.reply_text(pre_message)
+
+    if parse_mode_key == 'HTML':
+        await send_html_in_chunks(update.message, reply_text)
         return
-    
-    if not context.args:
-        await update.message.reply_text("Please provide a search query.\nExample: /search important")
-        return
-    
-    query = " ".join(context.args)
-    await update.message.reply_text(f"🔍 Searching for '{query}'...")
-    result = handle_email_action("search", context.args, email_service, str(update.effective_user.id))
-    await send_html_in_chunks(update.message, result)
+
+    await update.message.reply_text(reply_text)
 
 
 async def send_html_in_chunks(message, text, chunk_size=3400):
@@ -1796,38 +1794,24 @@ async def send_html_in_chunks(message, text, chunk_size=3400):
             await message.reply_text(chunk, parse_mode=ParseMode.HTML)
 
 
-async def email_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /email subcommands (recent, unread, search, read)"""
-    if not is_user_allowed(update.effective_user.id):
-        await update.message.reply_text("You are not authorized to use this bot.")
-        return
-
-    args = context.args or []
-    if not args:
-        await update.message.reply_text(email_command_help())
-        return
-
-    action = args[0].lower()
-    user_id = str(update.effective_user.id)
-
-    reply_text = handle_email_action(action, args[1:], email_service, user_id)
-    await send_html_in_chunks(update.message, reply_text)
-
 async def addjob_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /addjob command"""
     if not is_user_allowed(update.effective_user.id):
-        await update.message.reply_text("You are not authorized to use this bot.")
+        await safe_reply(update.message, "You are not authorized to use this bot.", preferred_mode=ParseMode.HTML)
         return
     
-    help_text = """Add a cron job:
+    help_text = call_service(
+        'cron',
+        'get_addjob_help_text',
+        default="""Add a cron job:
 
 /addjob <name> <type> <schedule> [params]
 
 Types:
-• check_email - Check for new emails
 • send_message - Send a message
 • custom_command - Run a command
 • cleanup - Cleanup old data
+• check_email - Run scheduled email check
 
 Schedule examples:
 • "every 30 minutes"
@@ -1839,10 +1823,11 @@ Examples:
 /addjob morning_email check_email "daily at 08:00"
 /addjob hourly_check check_email "every 1 hour"
 /addjob reminder send_message "daily at 12:00" message="Take a break!"
-"""
+""",
+    )
     
     if len(context.args) < 3:
-        await update.message.reply_text(help_text)
+        await safe_reply(update.message, help_text, preferred_mode=ParseMode.HTML)
         return
     
     name = context.args[0]
@@ -1883,48 +1868,65 @@ Examples:
             'enabled': True
         }
         if schedule_job(job):
-            await update.message.reply_text(f"✅ Cron job '{name}' added and scheduled!")
+            await safe_reply(update.message, f"✅ Cron job <code>{name}</code> added and scheduled!", preferred_mode=ParseMode.HTML)
         else:
-            await update.message.reply_text(f"⚠️ Job added to database but failed to schedule. Check logs.")
+            await safe_reply(update.message, "⚠️ Job added to database but failed to schedule. Check logs.", preferred_mode=ParseMode.HTML)
     else:
-        await update.message.reply_text(f"❌ {message}")
+        await safe_reply(update.message, f"❌ {message}", preferred_mode=ParseMode.HTML)
 
 async def listjobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /listjobs command"""
     if not is_user_allowed(update.effective_user.id):
-        await update.message.reply_text("You are not authorized to use this bot.")
+        await safe_reply(update.message, "You are not authorized to use this bot.", preferred_mode=ParseMode.HTML)
         return
     
     jobs = database.get_all_cron_jobs()
     
     if not jobs:
-        await update.message.reply_text("No cron jobs configured.")
+        await safe_reply(update.message, "No cron jobs configured.", preferred_mode=ParseMode.HTML)
         return
     
-    result = "⏰ Scheduled Cron Jobs:\n\n"
-    for job in jobs:
+    jobs = sorted(jobs, key=lambda job: int(job.get('id', 0)))
+
+    result = "⏰ <b>Scheduled Cron Jobs</b>:\n\n"
+    for index, job in enumerate(jobs, 1):
         status = "✅" if job['enabled'] else "❌"
-        result += f"{status} {job['name']}\n"
-        result += f"   Type: {job['job_type']}\n"
-        result += f"   Schedule: {job['schedule']}\n"
+        safe_name = html.escape(str(job.get('name', '')))
+        safe_type = html.escape(str(job.get('job_type', '')))
+        safe_schedule = html.escape(str(job.get('schedule', '')))
+        result += f"{status} <b>{index}.</b> <code>{safe_name}</code> (ID: <code>{job['id']}</code>)\n"
+        result += f"   Type: {safe_type}\n"
+        result += f"   Schedule: {safe_schedule}\n"
         if job['params']:
-            result += f"   Params: {job['params']}\n"
+            safe_params = html.escape(str(job['params']))
+            result += f"   Params: {safe_params}\n"
         result += "\n"
     
-    result += "\nUse /removejob <name> to delete a job"
-    await update.message.reply_text(result)
+    result += "\nUse <code>/removejob &lt;id|name&gt;</code> to delete a job"
+    await safe_reply(update.message, result, preferred_mode=ParseMode.HTML)
 
 async def removejob_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /removejob command"""
     if not is_user_allowed(update.effective_user.id):
-        await update.message.reply_text("You are not authorized to use this bot.")
+        await safe_reply(update.message, "You are not authorized to use this bot.", preferred_mode=ParseMode.HTML)
         return
     
     if not context.args:
-        await update.message.reply_text("Usage: /removejob <job_name>")
+        await safe_reply(update.message, "Usage: <code>/removejob &lt;job_id_or_name&gt;</code>", preferred_mode=ParseMode.HTML)
         return
     
-    name = context.args[0]
+    target = context.args[0].strip()
+    name = target
+    job_id = None
+
+    if target.isdigit():
+        job_id = int(target)
+        jobs = database.get_all_cron_jobs()
+        matched_job = next((job for job in jobs if int(job.get('id', 0)) == job_id), None)
+        if not matched_job:
+            await safe_reply(update.message, f"❌ Job ID <code>{job_id}</code> not found.", preferred_mode=ParseMode.HTML)
+            return
+        name = matched_job['name']
     
     # Remove from scheduler
     try:
@@ -1933,10 +1935,20 @@ async def removejob_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass  # Job might not be scheduled
     
     # Remove from database
-    if database.remove_cron_job(name):
-        await update.message.reply_text(f"✅ Cron job '{name}' removed!")
-    else:
-        await update.message.reply_text(f"❌ Job '{name}' not found.")
+    try:
+        if database.remove_cron_job(name):
+            if job_id is not None:
+                await safe_reply(update.message, f"✅ Cron job removed: ID <code>{job_id}</code> • <code>{name}</code>", preferred_mode=ParseMode.HTML)
+            else:
+                await safe_reply(update.message, f"✅ Cron job <code>{name}</code> removed!", preferred_mode=ParseMode.HTML)
+        else:
+            if job_id is not None:
+                await safe_reply(update.message, f"❌ Job ID <code>{job_id}</code> not found.", preferred_mode=ParseMode.HTML)
+            else:
+                await safe_reply(update.message, f"❌ Job <code>{name}</code> not found.", preferred_mode=ParseMode.HTML)
+    except Exception as exc:
+        logger.error(f"Failed to remove cron job '{name}': {exc}", exc_info=True)
+        await safe_reply(update.message, "❌ Failed to remove the job. Please try again.", preferred_mode=ParseMode.HTML)
 
 async def run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /run command - execute a shell command"""
@@ -2027,10 +2039,12 @@ async def learned_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 counter += 1
                 confidence = entry['confidence']
                 success_count = entry['success_count']
-                confidence_bar = "🟢" if confidence > 0.8 else "🟡" if confidence > 0.6 else "🔴"
+                is_active = confidence >= 0.6
+                status_dot = "🟢" if is_active else "🔴"
+                status_text = "active" if is_active else "inactive"
                 safe_input = html.escape(entry['user_input'] or '')
                 safe_intent = html.escape(entry['detected_intent'] or '')
-                result += f"{counter}. [#{entry['id']}] <code>{safe_input}</code> → {safe_intent} (used {success_count}x)\n"
+                result += f"{counter}. {status_dot} [#{entry['id']}] <code>{safe_input}</code> → {safe_intent} ({status_text}, used {success_count}x)\n"
             result += "\n"
 
         result += "<i>I'm learning your language patterns to serve you better!</i>\n\n"
@@ -2121,6 +2135,7 @@ async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
+        runtime_keys = set(get_runtime_allowed_config_keys())
         result = "⚙️ <b>Current Configuration:</b>\n\n"
         
         result += "<b>🤖 AI Backend:</b>\n"
@@ -2132,17 +2147,11 @@ async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result += f"  Model: <code>{config.OPENAI_MODEL}</code>\n"
         result += f"  Chat History: <code>{config.CHAT_HISTORY_LIMIT}</code> messages\n\n"
         
-        result += "<b>🌤️ Weather:</b>\n"
-        result += f"  Default City: <code>{config.DEFAULT_CITY}</code>\n"
-        result += f"  Country: <code>{config.DEFAULT_COUNTRY_CODE}</code>\n"
-        result += f"  API Key: <code>{'✓ Set' if config.OPENWEATHER_API_KEY else '✗ Not set'}</code>\n\n"
-        
-        result += "<b>📧 Gmail:</b>\n"
-        result += f"  Email: <code>{config.GMAIL_EMAIL if config.GMAIL_EMAIL else '✗ Not set'}</code>\n"
-        result += f"  Password: <code>{'✓ Set' if config.GMAIL_APP_PASSWORD else '✗ Not set'}</code>\n\n"
-        
-        result += "<b>📰 News:</b>\n"
-        result += f"  API Key: <code>{'✓ Set' if config.NEWSAPI_KEY else '✗ Not set'}</code>\n\n"
+        # if 'OPENWEATHER_API_KEY' in runtime_keys:
+        #     result += "<b>🌤️ Weather:</b>\n"
+        #     result += f"  Default City: <code>{config.DEFAULT_CITY}</code>\n"
+        #     result += f"  Country: <code>{config.DEFAULT_COUNTRY_CODE}</code>\n"
+        #     result += f"  API Key: <code>{'✓ Set' if config.OPENWEATHER_API_KEY else '✗ Not set'}</code>\n\n"
 
         result += "<b>💬 Discord:</b>\n"
         result += f"  Bot Token: <code>{'✓ Set' if config.DISCORD_BOT_TOKEN else '✗ Not set'}</code>\n"
@@ -2176,34 +2185,14 @@ async def setconfig_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if len(context.args) < 2:
+        available_keys = get_runtime_allowed_config_keys()
+        key_lines = "\n".join([f"• <code>{key}</code>" for key in available_keys])
         help_text = """⚙️ <b>Set Configuration</b>
 
 <b>Usage:</b> <code>/setconfig KEY VALUE</code>
 
 <b>Available Keys:</b>
-• <code>AI_BACKEND</code> - ollama or openai
-• <code>OLLAMA_MODEL</code> - Model name (e.g., llama3.2)
-• <code>OLLAMA_URL</code> - Ollama API URL
-• <code>OPENAI_MODEL</code> - OpenAI model (e.g., gpt-4)
-• <code>CHAT_HISTORY_LIMIT</code> - Number of messages to remember
-• <code>DEFAULT_CITY</code> - Default weather city
-• <code>DEFAULT_COUNTRY_CODE</code> - Country code (e.g., US)
-• <code>GMAIL_EMAIL</code> - Your Gmail address
-• <code>NEWSAPI_KEY</code> - News API key
-• <code>OPENWEATHER_API_KEY</code> - Weather API key
-• <code>DISCORD_BOT_TOKEN</code> - Discord bot token
-• <code>DISCORD_ALLOWED_CHANNEL_IDS</code> - Comma-separated Discord channel IDs
-• <code>WHATSAPP_TWILIO_ACCOUNT_SID</code> - Twilio account SID for WhatsApp
-• <code>WHATSAPP_TWILIO_AUTH_TOKEN</code> - Twilio auth token for WhatsApp
-• <code>WHATSAPP_TWILIO_NUMBER</code> - Twilio WhatsApp sender number
-• <code>WHATSAPP_WEBHOOK_VERIFY_TOKEN</code> - Optional webhook verification token
-• <code>TRELLO_API_KEY</code> - Trello API key
-• <code>TRELLO_TOKEN</code> - Trello token
-• <code>RAG_ENABLED</code> - true/false for retrieval
-• <code>RAG_KB_DIR</code> - Knowledge base folder path
-• <code>RAG_TOP_K</code> - Number of chunks to retrieve
-• <code>RAG_CHUNK_SIZE</code> - Chunk size in characters
-• <code>RAG_MAX_CONTEXT_CHARS</code> - Max retrieved context length
+""" + key_lines + """
 
 <b>Examples:</b>
 <code>/setconfig OLLAMA_MODEL llama3.2</code>
@@ -2219,7 +2208,7 @@ async def setconfig_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     key = context.args[0].upper()
     value = ' '.join(context.args[1:])
     
-    if key not in ALLOWED_CONFIG_KEYS:
+    if not is_runtime_allowed_config_key(key):
         await update.message.reply_text(f"❌ Invalid config key: {key}\n\nUse /setconfig without arguments to see available keys.")
         return
     
@@ -2266,7 +2255,7 @@ async def gateway_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = args[0].lower()
     if action == 'list':
         lines = ["🛡️ <b>Gateway Config Keys</b>"]
-        for key in ALLOWED_CONFIG_KEYS:
+        for key in get_runtime_allowed_config_keys():
             current = str(getattr(config, key, ''))
             lines.append(f"• <code>{key}</code> = <code>{html.escape(_mask_value(key, current))}</code>")
         await send_html_in_chunks(update.message, "\n".join(lines), chunk_size=3200)
@@ -2277,7 +2266,7 @@ async def gateway_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Usage: /gateway get KEY")
             return
         key = args[1].upper()
-        if key not in ALLOWED_CONFIG_KEYS:
+        if not is_runtime_allowed_config_key(key):
             await update.message.reply_text(f"❌ Invalid config key: {key}")
             return
         value = str(getattr(config, key, ''))
@@ -2366,7 +2355,6 @@ async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>Natural language examples</b>
 • "list files"
 • "read file bot.py"
-• "search code for check_weather"
 • "git status"
 • "show config"
 • "set config CHAT_HISTORY_LIMIT 10"
@@ -2575,24 +2563,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ai_backend = config.AI_BACKEND
     model = config.OLLAMA_MODEL if ai_backend == "ollama" else "OpenAI GPT"
     
-    # API Keys status
-    api_status = []
-    if hasattr(config, 'OPENWEATHER_API_KEY') and config.OPENWEATHER_API_KEY:
-        api_status.append("Weather ✅")
-    else:
-        api_status.append("Weather ❌")
-    
-    if hasattr(config, 'NEWSAPI_KEY') and config.NEWSAPI_KEY:
-        api_status.append("News ✅")
-    else:
-        api_status.append("News ❌")
-    
-    if hasattr(config, 'GMAIL_EMAIL') and config.GMAIL_EMAIL:
-        api_status.append("Gmail ✅")
-    else:
-        api_status.append("Gmail ❌")
-    
-    apis = " • ".join(api_status)
+    # API Keys status (discovered from plugin metadata)
+    api_status = get_plugin_api_status(config)
     
     # System info
     if PSUTIL_AVAILABLE:
@@ -2626,6 +2598,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     bot_name = get_bot_name()
     scheduler_status = "Running ✅" if scheduler_running else "Stopped ❌"
+    enabled_skills_count = len([skill for skill in get_skill_definitions().values() if skill.enabled])
     api_status_text = "\n".join([f"• {item}" for item in api_status])
     system_stats_text = system_stats
 
@@ -2651,7 +2624,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Uptime: <code>{uptime}</code>\n"
         f"{system_stats_text}\n\n"
         f"<b>📊 Summary</b>\n"
-        f"• Features: <code>18 core capabilities</code>\n"
+        f"• Enabled Skills: <code>{enabled_skills_count}</code>\n"
         f"• Status: <b>Operational ⚡</b>"
     )
 
@@ -3207,7 +3180,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if action == "setconfig":
                 key = advanced_request.get("key", "")
                 value = advanced_request.get("value", "")
-                if key not in ALLOWED_CONFIG_KEYS:
+                if not is_runtime_allowed_config_key(key):
                     await update.message.reply_text(f"❌ Invalid config key: {key}")
                     return
                 try:
@@ -3233,18 +3206,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     command_keywords = ["run command", "execute command", "run the command", "execute this"]
     msg_lower = user_message.lower()
 
-    if trello_service is not None:
-        trello_request = trello_service.detect_request(user_message)
-        if trello_request:
-            trello_result = trello_service.handle_request(
-                trello_request,
-                user_id,
-                get_user_context=lambda uid, key: database.get_user_context(uid, key),
-                save_user_context=lambda uid, key, value: database.save_user_context(uid, key, value),
-            )
-            await update.message.reply_text(trello_result)
-            database.save_message("telegram", user_id, user_name, user_message, trello_result)
-            return
+    trello_request = call_service('trello', 'detect_request', user_message, default=None)
+    if trello_request:
+        trello_result = call_service(
+            'trello',
+            'handle_request',
+            trello_request,
+            user_id,
+            get_user_context=lambda uid, key: database.get_user_context(uid, key),
+            save_user_context=lambda uid, key, value: database.save_user_context(uid, key, value),
+            default="❌ Trello service is not available right now.",
+        )
+        await update.message.reply_text(trello_result)
+        database.save_message("telegram", user_id, user_name, user_message, trello_result)
+        return
     
     if any(keyword in msg_lower for keyword in command_keywords):
         # Extract the command
@@ -3257,7 +3232,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 if command:
                     result = run_custom_command(command)
-                    await update.message.reply_text(result)
                     await update.message.reply_text(result)
                     learn_command_like_success(user_id, user_message, f"command_exec:{command}", result)
                     database.save_message("telegram", user_id, user_name, user_message, result)
@@ -3302,11 +3276,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
     # Check if this is a cron job management request (edit, delete, enable, disable, list)
-    cron_mgmt_keywords = ["delete job", "remove job", "disable job", "enable job", "pause job",
-                         "edit job", "change job", "update job", "modify job", "list jobs", 
-                         "show jobs", "my jobs", "stop job", "start job", "resume job"]
-    
-    if any(keyword in user_message.lower() for keyword in cron_mgmt_keywords):
+    if call_service('cron_nl', 'looks_like_management_request', user_message, default=False):
         mgmt_result = manage_cron_job_nl(user_message, user_id)
         
         if mgmt_result:
@@ -3315,10 +3285,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # Check if this is a cron job creation request
-    cron_keywords = ["remind me", "schedule", "every hour", "every day", "every morning", 
-                     "daily at", "send me a message", "notify me", "alert me"]
-    
-    if any(keyword in user_message.lower() for keyword in cron_keywords):
+    if call_service('cron_nl', 'looks_like_cron_request', user_message, default=False):
         # Try to parse as cron job
         cron_result = create_cron_from_natural_language(user_message, user_id)
         
@@ -3335,121 +3302,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         database.save_message("telegram", user_id, user_name, user_message, tracking_result)
         return
 
-    # Check if user is explicitly teaching/saving preferred location
-    learned_location = detect_location_learning_request(user_message)
-    if learned_location:
-        city = learned_location.get('city')
-        country_code = learned_location.get('country_code')
-        raw_location = learned_location.get('raw_location')
-
-        database.save_user_context(user_id, 'last_weather_city', city)
-        if country_code:
-            database.save_user_context(user_id, 'last_weather_country', country_code)
-
-        # Learn this phrasing for weather intent too
-        if weather_service and hasattr(weather_service, '_encode_weather_intent'):
-            learned_intent = weather_service._encode_weather_intent(city, country_code)
-        else:
-            learned_intent = f"weather:{city}"
-        learn_from_interaction(user_id, user_message.lower().strip(), 'weather', learned_intent)
-
-        reply = f"📍 Got it! I saved your default location as: *{raw_location}*\n"
-        reply += f"🌆 Weather city: *{city}*\n"
-        if country_code:
-            reply += f"🌍 Country code: `{country_code}`\n"
-        reply += "\n"
-        reply += "Now when you ask just *weather*, I'll use this location."
-
-        await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
-        database.save_message("telegram", user_id, user_name, user_message, reply)
-        return
-
-    # Check if user is teaching preferred weather response style
-    weather_style = detect_weather_style_learning_request(user_message)
-    if weather_style:
-        selected_style = weather_style.get('style')
-        explicit_learning = weather_style.get('explicit_learning', False)
-
-        database.save_user_context(user_id, 'weather_response_style', selected_style)
-        learn_from_interaction(user_id, user_message.lower().strip(), 'weather', f'weather_style:{selected_style}')
-
-        # If user explicitly asked to learn style (not requesting weather now), confirm and return
-        if explicit_learning and not detect_weather_request(user_message, user_id):
-            style_text = "news-like brief" if selected_style == 'brief' else "detailed/default"
-            reply = f"✅ Learned! I'll use *{style_text}* format for your weather replies from now on."
-            await update.message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
-            database.save_message("telegram", user_id, user_name, user_message, reply)
-            return
-
-    # Check if this is a weather request (with AI learning)
-    weather_detection = detect_weather_request(user_message, user_id)
-    if not weather_detection and nlu_intent == 'weather':
-        weather_detection = detect_weather_request("weather", user_id)
-    if weather_detection and weather_detection.get('is_weather'):
-        city = weather_detection.get('city')
-        country_code = weather_detection.get('country_code')
-        preferred_style = (weather_style.get('style') if weather_style else None) or database.get_user_context(user_id, 'weather_response_style') or 'standard'
-        previous_city = database.get_user_context(user_id, 'last_weather_city')
-        previous_country = database.get_user_context(user_id, 'last_weather_country')
-        
-        # If no city specified, ask the user
-        if city == 'ASK_USER':
-            ask_message = """🌍 *Please specify the city and country for weather information*
-
-📝 *Format:* `weather in [city], [country]`
-
-*Examples:*
-• weather in London, UK
-• weather in Tokyo, Japan
-• weather in New York, USA
-• weather in Paris, France
-
-_Or just reply with the city name if it's unique_"""
-            await update.message.reply_text(ask_message, parse_mode=ParseMode.MARKDOWN)
-            database.save_message("telegram", user_id, user_name, user_message, ask_message)
-            return
-        
-        weather_result = get_weather(city, country_code, preferred_style)
-        
-        # Save this location for future queries (remember last used location)
-        location_changed = False
-        if user_id and city and city != 'ASK_USER':
-            normalized_new_city = city.strip().lower()
-            normalized_prev_city = (previous_city or '').strip().lower()
-            normalized_new_country = (country_code or '').strip().upper()
-            normalized_prev_country = (previous_country or '').strip().upper()
-            location_changed = (
-                normalized_new_city != normalized_prev_city
-                or (normalized_new_country and normalized_new_country != normalized_prev_country)
-            )
-
-            database.save_user_context(user_id, 'last_weather_city', city)
-            if country_code:
-                database.save_user_context(user_id, 'last_weather_country', country_code)
-
-        if location_changed and "❌" not in weather_result:
-            weather_result += "\n\n_📍 Default location updated._"
-        
-        await update.message.reply_text(weather_result, parse_mode=ParseMode.MARKDOWN)
-        database.save_message("telegram", user_id, user_name, user_message, weather_result)
-        return
-
-    # Check if this is a note request
-    note_detection = detect_note_request(user_message, user_id)
-    if note_detection:
-        action = note_detection.get('action')
-        if action == 'create':
-            result = handle_note_create(user_message, user_id)
-        elif action == 'list':
-            result = handle_note_list(user_id)
-        elif action == 'search':
-            query = note_detection.get('query')
-            result = handle_note_search(query, user_id)
-        else:
-            result = "❌ Unknown note action"
-        
-        await update.message.reply_text(result, parse_mode=ParseMode.HTML)
-        database.save_message("telegram", user_id, user_name, user_message, result)
+    plugin_outcome = invoke_first_available_method(
+        'handle_interaction',
+        user_message,
+        user_id,
+        nlu_intent=nlu_intent,
+        get_user_context=lambda uid, key: database.get_user_context(uid, key),
+        save_user_context=lambda uid, key, value: database.save_user_context(uid, key, value),
+        check_learned_patterns=check_learned_patterns,
+        learn_from_interaction=learn_from_interaction,
+        ask_ollama=ask_ollama,
+        default=None,
+    )
+    if plugin_outcome and plugin_outcome.get('handled'):
+        plugin_reply = plugin_outcome.get('reply', '')
+        parse_mode_key = plugin_outcome.get('parse_mode', 'MARKDOWN')
+        parse_mode = getattr(ParseMode, parse_mode_key, ParseMode.MARKDOWN)
+        await update.message.reply_text(plugin_reply, parse_mode=parse_mode)
+        database.save_message("telegram", user_id, user_name, user_message, plugin_reply)
         return
 
     # NOTE: Reminders are now handled as one-time cron jobs
@@ -3511,10 +3381,12 @@ _Or just reply with the city name if it's unique_"""
         return
 
     # Check if this is a Wikipedia request
-    wiki_detection = detect_wikipedia_request(user_message, user_id)
-    if not wiki_detection and nlu_intent == 'wikipedia':
+    wiki_detection = None
+    if nlu_intent == 'wikipedia':
         wiki_detection = {'action': 'wiki', 'query': user_message}
-    if wiki_detection and not detect_search_request(user_message, user_id):
+    if not wiki_detection:
+        wiki_detection = detect_wikipedia_request(user_message, user_id)
+    if wiki_detection and nlu_intent != 'search' and not detect_search_request(user_message, user_id):
         query = wiki_detection.get('query')
         await update.message.reply_text(f"📚 Searching Wikipedia for '{query}'...")
         result = search_wikipedia(query)
@@ -3523,9 +3395,11 @@ _Or just reply with the city name if it's unique_"""
         return
 
     # Check if this is a web search request
-    search_detection = detect_search_request(user_message, user_id)
-    if not search_detection and nlu_intent == 'search':
+    search_detection = None
+    if nlu_intent == 'search':
         search_detection = {'action': 'search', 'query': user_message}
+    if not search_detection:
+        search_detection = detect_search_request(user_message, user_id)
     if search_detection:
         query = search_detection.get('query')
         await update.message.reply_text(f"🔍 Searching for '{query}'...")
@@ -3535,9 +3409,11 @@ _Or just reply with the city name if it's unique_"""
         return
 
     # Check if this is a news request
-    news_detection = detect_news_request(user_message, user_id)
-    if not news_detection and nlu_intent == 'news':
+    news_detection = None
+    if nlu_intent == 'news':
         news_detection = {'action': 'news', 'topic': None}
+    if not news_detection:
+        news_detection = detect_news_request(user_message, user_id)
     if news_detection:
         topic = news_detection.get('topic')
         msg = f"📰 Fetching news{' about ' + topic if topic else ''}..."
@@ -3548,38 +3424,25 @@ _Or just reply with the city name if it's unique_"""
         return
 
     # Check if this is a status request
-    status_detection = detect_status_request(user_message, user_id)
-    if not status_detection and nlu_intent == 'status':
+    status_detection = None
+    if nlu_intent == 'status':
         status_detection = {'action': 'status'}
+    if not status_detection:
+        status_detection = detect_status_request(user_message, user_id)
     if status_detection:
         await status_command(update, context)
         return
 
     # Check if this is a daily briefing request
-    briefing_detection = detect_briefing_request(user_message, user_id)
-    if not briefing_detection and nlu_intent == 'briefing':
+    briefing_detection = None
+    if nlu_intent == 'briefing':
         briefing_detection = {'action': 'briefing'}
+    if not briefing_detection:
+        briefing_detection = detect_briefing_request(user_message, user_id)
     if briefing_detection:
         await update.message.reply_text("📋 Preparing your daily briefing...")
         result = generate_daily_briefing(user_id)
         await update.message.reply_text(result, parse_mode=ParseMode.MARKDOWN)
-        database.save_message("telegram", user_id, user_name, user_message, result)
-        return
-
-    # Check if this is a request to read a specific numbered email
-    email_number = interpret_read_email_request(user_message)
-    if email_number:
-        await update.message.reply_text(f"📖 Reading email #{email_number}...")
-        result = handle_read_email(email_number, email_service, user_id)
-        await send_html_in_chunks(update.message, result)
-        database.save_message("telegram", user_id, user_name, user_message, result)
-        return
-
-    # Check if this is a natural language email request
-    email_request = interpret_email_request(user_message)
-    if email_request:
-        result = handle_email_request(email_request, email_service, user_id)
-        await send_html_in_chunks(update.message, result)
         database.save_message("telegram", user_id, user_name, user_message, result)
         return
 
@@ -3983,6 +3846,28 @@ def run_flask():
         logger.warning("Dashboard JWT secret not set. Dashboard is open without token.")
     app.run(host='0.0.0.0', port=3000, debug=False, use_reloader=False)
 
+
+def maybe_sync_skill_metadata_on_startup():
+    if not getattr(config, 'AUTO_SYNC_SKILL_METADATA', True):
+        logger.info("Skill metadata auto-sync disabled (AUTO_SYNC_SKILL_METADATA=false)")
+        return
+
+    only_missing = bool(getattr(config, 'SKILL_METADATA_SYNC_ONLY_MISSING', False))
+    try:
+        summary = sync_skill_metadata_commands(only_missing=only_missing)
+        logger.info(
+            "Skill metadata sync complete: updated=%d skipped=%d failed=%d",
+            len(summary.get('updated', [])),
+            len(summary.get('skipped', [])),
+            len(summary.get('failed', [])),
+        )
+        if summary.get('updated'):
+            logger.info("Updated skill metadata: %s", ", ".join(summary['updated']))
+        if summary.get('failed'):
+            logger.warning("Failed skill metadata sync for: %s", ", ".join(summary['failed']))
+    except Exception as exc:
+        logger.warning(f"Skill metadata auto-sync failed: {exc}")
+
 async def setup_bot_commands(application):
     """Set up the bot command menu in Telegram"""
     commands = [
@@ -4005,10 +3890,10 @@ async def setup_bot_commands(application):
         BotCommand("searchcode", "Search for text in project files"),
         BotCommand("git", "Git operations (status, commit, push, etc.)"),
         BotCommand("exec", "Execute Python code snippet"),
-        BotCommand("unread", "Check unread emails"),
-        BotCommand("recent", "View recent emails"),
-        BotCommand("search", "Search emails (use: /search <query>)"),
-        BotCommand("email", "Email helper (/email <recent|unread|search|read>)"),
+        # BotCommand("unread", "Check unread emails"),
+        # BotCommand("recent", "View recent emails"),
+        # BotCommand("search", "Search emails (use: /search <query>)"),
+        # BotCommand("email", "Email helper (/email <recent|unread|search|read>)"),
         BotCommand("addjob", "Add a scheduled task manually"),
         BotCommand("listjobs", "List all scheduled tasks and reminders"),
         BotCommand("removejob", "Remove a scheduled task (use: /removejob <name>)"),
@@ -4025,6 +3910,8 @@ def main():
     if not ensure_runtime_onboarding():
         logger.error("Onboarding/config validation failed. Exiting.")
         return
+
+    maybe_sync_skill_metadata_on_startup()
     
     # Start Flask in a background thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
@@ -4065,10 +3952,10 @@ def main():
     # Code execution
     app.add_handler(CommandHandler("exec", execcode_command))
     # Email and tasks
-    app.add_handler(CommandHandler("unread", unread_emails_command))
-    app.add_handler(CommandHandler("recent", recent_emails_command))
-    app.add_handler(CommandHandler("search", search_emails_command))
-    app.add_handler(CommandHandler("email", email_command))
+    app.add_handler(CommandHandler("unread", lambda update, context: plugin_command_bridge(update, context, 'unread')))
+    app.add_handler(CommandHandler("recent", lambda update, context: plugin_command_bridge(update, context, 'recent')))
+    app.add_handler(CommandHandler("search", lambda update, context: plugin_command_bridge(update, context, 'search')))
+    app.add_handler(CommandHandler("email", lambda update, context: plugin_command_bridge(update, context, 'email')))
     app.add_handler(CommandHandler("addjob", addjob_command))
     app.add_handler(CommandHandler("listjobs", listjobs_command))
     app.add_handler(CommandHandler("removejob", removejob_command))

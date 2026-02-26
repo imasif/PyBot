@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Dict, List, Optional
 
 import config
@@ -16,6 +17,10 @@ class UniversalNLUService:
         self._model = None
         self._util = None
         self._intent_vectors: Dict[str, object] = {}
+        self._greeting_patterns = {
+            'hi', 'hello', 'hey', 'hey there', 'yo', 'sup',
+            'good morning', 'good afternoon', 'good evening'
+        }
 
         self._intent_examples: Dict[str, List[str]] = {
             'weather': [
@@ -101,6 +106,11 @@ class UniversalNLUService:
 
     def detect_intent(self, text: str) -> Optional[Dict[str, float]]:
         if not text or not self.enabled or self._model is None or self._util is None:
+            return None
+
+        normalized_text = re.sub(r'[^a-z0-9\s]', ' ', text.lower()).strip()
+        normalized_text = re.sub(r'\s+', ' ', normalized_text)
+        if normalized_text in self._greeting_patterns:
             return None
 
         try:

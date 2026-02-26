@@ -4,8 +4,16 @@
   "module": "services.browser",
   "class": "BrowserAutomationService",
   "description": "Automates Brave/Chrome to open URLs, search the web, or play YouTube links safely.",
-  "commands": ["youtube_play", "web_search", "open_url", "custom"],
-  "keywords": ["browser", "youtube", "open url", "automation", "web"],
+  "commands": [
+    "automate"
+  ],
+  "keywords": [
+    "browser",
+    "youtube",
+    "open url",
+    "automation",
+    "web"
+  ],
   "enabled": true,
   "instructions_file": "instructions.md"
 }

@@ -11,7 +11,88 @@ logger = logging.getLogger(__name__)
 
 
 class CronNLService:
+    def looks_like_management_request(self, text):
+        text_lower = (text or '').lower().strip()
+        if not text_lower:
+            return False
+
+        management_keywords = [
+            "delete job", "remove job", "disable job", "enable job", "pause job",
+            "edit job", "change job", "update job", "modify job", "list jobs",
+            "show jobs", "my jobs", "stop job", "start job", "resume job",
+        ]
+        return any(keyword in text_lower for keyword in management_keywords)
+
+    def looks_like_cron_request(self, text):
+        text_lower = (text or '').lower().strip()
+        if not text_lower:
+            return False
+
+        cron_keywords = [
+            "remind me", "schedule", "every hour", "every day", "every morning",
+            "daily at", "everyday", "send me a message", "notify me", "alert me",
+        ]
+        return any(keyword in text_lower for keyword in cron_keywords)
+
+    def _extract_daily_time(self, text):
+        match = re.search(r'\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b', text, re.IGNORECASE)
+        if not match:
+            return None
+
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+        meridiem = (match.group(3) or '').lower()
+
+        if meridiem == 'pm' and hour != 12:
+            hour += 12
+        elif meridiem == 'am' and hour == 12:
+            hour = 0
+
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            return None
+
+        return f"{hour:02d}:{minute:02d}"
+
+    def _parse_rule_based_request(self, text):
+        text_lower = (text or '').lower().strip()
+        if not text_lower:
+            return None
+
+        is_daily = any(token in text_lower for token in ['everyday', 'every day', 'daily'])
+        mentions_email = any(token in text_lower for token in ['email', 'emails', 'gmail', 'inbox'])
+
+        if not (is_daily and mentions_email):
+            return None
+
+        hhmm = self._extract_daily_time(text_lower) or '09:00'
+        return {
+            "is_cron_request": True,
+            "name": f"daily_email_reminder_{hhmm.replace(':', '')}",
+            "type": "check_email",
+            "schedule": f"daily at {hhmm}",
+            "params": {},
+        }
+
+    def _is_email_fetch_intent(self, text, job_type, params):
+        normalized_text = (text or '').lower()
+        normalized_type = (job_type or '').strip().lower()
+        if normalized_type == 'check_email':
+            return True
+
+        if normalized_type != 'send_message':
+            return False
+
+        message = str((params or {}).get('message', '')).lower()
+        mentions_email = any(token in normalized_text for token in ['email', 'emails', 'gmail', 'inbox'])
+        asks_check = any(token in normalized_text for token in ['check', 'show', 'get', 'fetch', 'read', 'recent', 'unread'])
+        message_email_only = message and any(token in message for token in ['email', 'emails', 'gmail', 'inbox'])
+        return (mentions_email and asks_check) or message_email_only
+
     def parse_cron_from_text(self, text, get_ai_response):
+        rule_based = self._parse_rule_based_request(text)
+        if rule_based:
+            return rule_based
+
         prompt = f'''Parse this scheduling/reminder request and extract the details in JSON format:
 "{text}"
 
@@ -30,7 +111,7 @@ Schedule formats:
 - One-time: "at YYYY-MM-DD HH:MM" or "in X hours/minutes"
 
 Examples:
-- "remind me to check email every morning at 9am" → {{"is_cron_request": true, "name": "morning_email_check", "type": "send_message", "schedule": "daily at 09:00", "params": {{"message": "check email"}}}}
+- "remind me to check email every morning at 9am" → {{"is_cron_request": true, "name": "morning_email_check", "type": "check_email", "schedule": "daily at 09:00", "params": {{}}}}
 - "send me a message every hour saying check tasks" → {{"is_cron_request": true, "name": "hourly_task_reminder", "type": "send_message", "schedule": "every 1 hour", "params": {{"message": "check tasks"}}}}
 - "remind me to call John at 3pm" → {{"is_cron_request": true, "name": "call_john_reminder", "type": "send_message", "schedule": "at {datetime.now().strftime('%Y-%m-%d')} 15:00", "params": {{"message": "call John"}}}}
 - "remind me to exercise in 2 hours" → {{"is_cron_request": true, "name": "exercise_reminder", "type": "send_message", "schedule": "in 2 hours", "params": {{"message": "exercise"}}}}
@@ -60,9 +141,13 @@ Only return the JSON, nothing else.'''
         schedule = parsed.get("schedule", "daily at 09:00")
         params = parsed.get("params") or {}
 
+        if self._is_email_fetch_intent(text, job_type, params):
+            job_type = "check_email"
+            params = {}
+
         if job_type == "send_message" and "message" not in params:
             params["message"] = text
-        if job_type == "send_message":
+        if job_type in {"send_message", "check_email"}:
             params["user_id"] = user_id
 
         success, message = database.add_cron_job(name, job_type, schedule, params)

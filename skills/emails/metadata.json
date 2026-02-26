@@ -4,8 +4,32 @@
   "module": "services.emails",
   "class": "EmailService",
   "description": "Connects to Gmail via IMAP to list unread or recent messages and read detailed content.",
-  "commands": ["list_unread", "list_recent", "search", "read_full"],
-  "keywords": ["email", "gmail", "inbox", "messages", "unread"],
+  "commands": [
+    "build_command_response",
+    "command_help",
+    "handle_command_action",
+    "handle_interaction",
+    "handle_natural_request",
+    "handle_read_number",
+    "interpret_read_request",
+    "interpret_request",
+    "list_recent",
+    "list_unread",
+    "read_full",
+    "search"
+  ],
+  "keywords": [
+    "email",
+    "gmail",
+    "inbox",
+    "messages",
+    "unread"
+  ],
+  "required_config": [
+    "GMAIL_EMAIL",
+    "GMAIL_APP_PASSWORD"
+  ],
+  "status_label": "Gmail",
   "enabled": true,
   "instructions_file": "instructions.md"
 }

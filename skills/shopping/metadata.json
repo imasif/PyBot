@@ -4,8 +4,19 @@
   "module": "services.shopping",
   "class": "ShoppingService",
   "description": "Parses shopping requests, adds items, lists the list, or clears purchased items.",
-  "commands": ["detect_request", "add_items", "list_items", "clear_items"],
-  "keywords": ["shopping", "list", "add", "buy", "groceries"],
+  "commands": [
+    "add_items",
+    "clear_items",
+    "detect_request",
+    "list_items"
+  ],
+  "keywords": [
+    "shopping",
+    "list",
+    "add",
+    "buy",
+    "groceries"
+  ],
   "enabled": true,
   "instructions_file": "instructions.md"
 }

@@ -4,8 +4,20 @@
   "module": "services.cron",
   "class": "CronService",
   "description": "Executes background jobs, sends reminders, and runs ad-hoc shell commands.",
-  "commands": ["run_custom_command", "execute_cron_job"],
-  "keywords": ["cron", "job", "reminder", "schedule", "command"],
+  "commands": [
+    "execute_cron_job",
+    "get_addjob_help_text",
+    "get_capability_summary",
+    "get_supported_job_types",
+    "run_custom_command"
+  ],
+  "keywords": [
+    "cron",
+    "job",
+    "reminder",
+    "schedule",
+    "command"
+  ],
   "enabled": true,
   "instructions_file": "instructions.md"
 }

@@ -7,8 +7,10 @@ Each service that powers the bot is defined as a skill:
 
 To introduce a new skill:
 
-- Create a dedicated folder under `services/skills/<slug>`.
-- Provide `metadata.json` with `module`, `class`, and optional `commands`, `keywords`, `init_args`, or `init_kwargs`.
+- Create a dedicated folder under `skills/<slug>`.
+- Provide `metadata.json` with `module`, `class`, and optional `keywords`, `init_args`, or `init_kwargs`.
+- Register command exports inside the service module using `SERVICE_SKILL_COMMANDS = [...]` (or class-level `SKILL_COMMANDS = [...]`).
+- Run `sync_skill_metadata_commands()` (or enable auto-sync on startup) to propagate service-declared commands into each skill `metadata.json`.
 - Write `instructions.md` that explains how the skill should behave and when it should trigger.
 - Restart the bot; the `plugin_registry` loader will automatically import and instantiate the new skill.
 

@@ -4,8 +4,35 @@
   "module": "services.weather",
   "class": "WeatherService",
   "description": "Retrieves current weather data from OpenWeatherMap for a city/country.",
-  "commands": ["get_weather"],
-  "keywords": ["weather", "forecast", "temperature", "rain", "wind", "humidity"],
+  "commands": [
+    "country_name_to_code",
+    "detect_location_learning_request",
+    "detect_weather_request",
+    "detect_weather_style_learning_request",
+    "get_briefing_summary",
+    "get_daily_briefing_section",
+    "get_weather",
+    "get_weather_response",
+    "handle_interaction",
+    "handle_weather_interaction",
+    "normalize_location_for_weather"
+  ],
+  "keywords": [
+    "weather",
+    "forecast",
+    "temperature",
+    "rain",
+    "wind",
+    "humidity"
+  ],
+  "required_config": [
+    "OPENWEATHER_API_KEY"
+  ],
+  "optional_config": [
+    "DEFAULT_CITY",
+    "DEFAULT_COUNTRY_CODE"
+  ],
+  "status_label": "Weather",
   "enabled": true,
   "instructions_file": "instructions.md"
 }

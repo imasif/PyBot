@@ -10,10 +10,56 @@ import config
 
 logger = logging.getLogger(__name__)
 
+SERVICE_SKILL_COMMANDS = [
+    'country_name_to_code',
+    'detect_location_learning_request',
+    'detect_weather_request',
+    'detect_weather_style_learning_request',
+    'get_daily_briefing_section',
+    'get_briefing_summary',
+    'get_weather',
+    'get_weather_response',
+    'handle_interaction',
+    'handle_weather_interaction',
+    'normalize_location_for_weather',
+]
+
 
 class WeatherService:
     def __init__(self):
         pass
+
+    @staticmethod
+    def _is_invalid_location_phrase(location: Optional[str]) -> bool:
+        if not location:
+            return True
+
+        normalized = re.sub(r'\s+', ' ', location.strip().lower())
+        if not normalized:
+            return True
+
+        invalid_exact = {
+            'weather',
+            'the weather',
+            'forecast',
+            'the forecast',
+            'temperature',
+            'today',
+            'tomorrow',
+            'tonight',
+            'now',
+            'right now',
+            'currently',
+        }
+        if normalized in invalid_exact:
+            return True
+
+        invalid_tokens = {'weather', 'forecast', 'temperature'}
+        tokens = set(re.findall(r'[a-zA-Z]+', normalized))
+        if tokens and tokens.issubset(invalid_tokens):
+            return True
+
+        return False
 
     def get_weather(self, city: Optional[str] = None, country_code: Optional[str] = None, style: str = 'standard') -> str:
         api_key = getattr(config, 'OPENWEATHER_API_KEY', '')
@@ -89,6 +135,23 @@ class WeatherService:
             logger.error(f"Unexpected weather error: {exc}")
             return "❌ An unexpected error occurred while fetching weather."
 
+    def get_briefing_summary(self, city: Optional[str] = None, country_code: Optional[str] = None) -> str:
+        weather_result = self.get_weather_response(city=city, country_code=country_code, style='standard')
+        if "❌" in weather_result:
+            return "Weather unavailable"
+
+        temp_match = re.search(r'Temperature:\*\* (.+?)°C', weather_result)
+        cond_match = re.search(r'Conditions:\*\* (.+?)\n', weather_result)
+        if temp_match and cond_match:
+            return f"{temp_match.group(1)}°C, {cond_match.group(1)}"
+
+        first_line = weather_result.split('\n')[0].strip()
+        return first_line or "Weather unavailable"
+
+    def get_daily_briefing_section(self, city: Optional[str] = None, country_code: Optional[str] = None) -> str:
+        summary = self.get_briefing_summary(city=city, country_code=country_code)
+        return f"🌤️ **Weather:**\n{summary}\n\n"
+
     def detect_weather_request(
         self,
         text,
@@ -139,6 +202,10 @@ class WeatherService:
 
                     if location:
                         location = re.sub(r'\b(today|tonight|tomorrow|now|currently|right now)\b', '', location, flags=re.IGNORECASE).strip(' ,')
+                        if self._is_invalid_location_phrase(location):
+                            location = None
+
+                    if location:
 
                         normalized = self.normalize_location_for_weather(location, ask_ollama=ask_ollama)
                         city = (normalized or {}).get('city') if normalized else None
@@ -147,10 +214,6 @@ class WeatherService:
                             city = location
 
                         result = {'is_weather': True, 'city': city, 'country_code': country_code}
-
-                        if user_id and learn_from_interaction:
-                            intent = self._encode_weather_intent(city, country_code)
-                            learn_from_interaction(user_id, text_lower, 'weather', intent)
 
                         return result
 
@@ -187,6 +250,164 @@ class WeatherService:
                 return {'is_weather': True, 'city': 'ASK_USER', 'country_code': None}
 
         return None
+
+    def handle_weather_interaction(
+        self,
+        text,
+        user_id,
+        nlu_intent=None,
+        get_user_context: Optional[Callable] = None,
+        save_user_context: Optional[Callable] = None,
+        check_learned_patterns: Optional[Callable] = None,
+        learn_from_interaction: Optional[Callable] = None,
+        ask_ollama: Optional[Callable] = None,
+    ):
+        text_lower = (text or '').lower().strip()
+
+        learned_location = self.detect_location_learning_request(text, ask_ollama=ask_ollama)
+        if learned_location:
+            city = learned_location.get('city')
+            country_code = learned_location.get('country_code')
+            raw_location = learned_location.get('raw_location')
+
+            if save_user_context and city:
+                save_user_context(user_id, 'last_weather_city', city)
+            if save_user_context and country_code:
+                save_user_context(user_id, 'last_weather_country', country_code)
+
+            if learn_from_interaction and city:
+                learned_intent = self._encode_weather_intent(city, country_code)
+                learn_from_interaction(user_id, text_lower, 'weather', learned_intent)
+
+            reply = f"📍 Got it! I saved your default location as: *{raw_location}*\n"
+            reply += f"🌆 Weather city: *{city}*\n"
+            if country_code:
+                reply += f"🌍 Country code: `{country_code}`\n"
+            reply += "\n"
+            reply += "Now when you ask just *weather*, I'll use this location."
+
+            return {'handled': True, 'reply': reply, 'parse_mode': 'MARKDOWN'}
+
+        weather_style = self.detect_weather_style_learning_request(text)
+        if weather_style:
+            selected_style = weather_style.get('style')
+            explicit_learning = weather_style.get('explicit_learning', False)
+
+            if save_user_context:
+                save_user_context(user_id, 'weather_response_style', selected_style)
+            if learn_from_interaction:
+                learn_from_interaction(user_id, text_lower, 'weather', f'weather_style:{selected_style}')
+
+            if explicit_learning and not self.detect_weather_request(
+                text,
+                user_id=user_id,
+                get_user_context=get_user_context,
+                save_user_context=save_user_context,
+                check_learned_patterns=check_learned_patterns,
+                learn_from_interaction=learn_from_interaction,
+                ask_ollama=ask_ollama,
+            ):
+                style_text = "news-like brief" if selected_style == 'brief' else "detailed/default"
+                reply = f"✅ Learned! I'll use *{style_text}* format for your weather replies from now on."
+                return {'handled': True, 'reply': reply, 'parse_mode': 'MARKDOWN'}
+
+        weather_detection = None
+        if nlu_intent == 'weather':
+            weather_detection = self.detect_weather_request(
+                'weather',
+                user_id=user_id,
+                get_user_context=get_user_context,
+                save_user_context=save_user_context,
+                check_learned_patterns=check_learned_patterns,
+                learn_from_interaction=learn_from_interaction,
+                ask_ollama=ask_ollama,
+            )
+        if not weather_detection:
+            weather_detection = self.detect_weather_request(
+                text,
+                user_id=user_id,
+                get_user_context=get_user_context,
+                save_user_context=save_user_context,
+                check_learned_patterns=check_learned_patterns,
+                learn_from_interaction=learn_from_interaction,
+                ask_ollama=ask_ollama,
+            )
+
+        if not (weather_detection and weather_detection.get('is_weather')):
+            return None
+
+        city = weather_detection.get('city')
+        country_code = weather_detection.get('country_code')
+        preferred_style = (
+            (weather_style.get('style') if weather_style else None)
+            or (get_user_context(user_id, 'weather_response_style') if get_user_context else None)
+            or 'standard'
+        )
+
+        previous_city = get_user_context(user_id, 'last_weather_city') if get_user_context else None
+        previous_country = get_user_context(user_id, 'last_weather_country') if get_user_context else None
+
+        if city == 'ASK_USER':
+            ask_message = """🌍 *Please specify the city and country for weather information*
+
+📝 *Format:* `weather in [city], [country]`
+
+*Examples:*
+• weather in London, UK
+• weather in Tokyo, Japan
+• weather in New York, USA
+• weather in Paris, France
+
+_Or just reply with the city name if it's unique_"""
+            return {'handled': True, 'reply': ask_message, 'parse_mode': 'MARKDOWN'}
+
+        weather_result = self.get_weather_response(city, country_code, preferred_style)
+
+        if city and city != 'ASK_USER' and '❌' not in weather_result:
+            if save_user_context:
+                save_user_context(user_id, 'last_weather_city', city)
+                if country_code:
+                    save_user_context(user_id, 'last_weather_country', country_code)
+
+            if learn_from_interaction:
+                intent = self._encode_weather_intent(city, country_code)
+                learn_from_interaction(user_id, text_lower, 'weather', intent)
+
+            normalized_new_city = city.strip().lower()
+            normalized_prev_city = (previous_city or '').strip().lower()
+            normalized_new_country = (country_code or '').strip().upper()
+            normalized_prev_country = (previous_country or '').strip().upper()
+            location_changed = (
+                normalized_new_city != normalized_prev_city
+                or (normalized_new_country and normalized_new_country != normalized_prev_country)
+            )
+
+            if location_changed:
+                weather_result += "\n\n_📍 Default location updated._"
+
+        return {'handled': True, 'reply': weather_result, 'parse_mode': 'MARKDOWN'}
+
+    def handle_interaction(
+        self,
+        text,
+        user_id,
+        nlu_intent=None,
+        get_user_context: Optional[Callable] = None,
+        save_user_context: Optional[Callable] = None,
+        check_learned_patterns: Optional[Callable] = None,
+        learn_from_interaction: Optional[Callable] = None,
+        ask_ollama: Optional[Callable] = None,
+    ):
+        return self.handle_weather_interaction(
+            text,
+            user_id,
+            nlu_intent=nlu_intent,
+            get_user_context=get_user_context,
+            save_user_context=save_user_context,
+            check_learned_patterns=check_learned_patterns,
+            learn_from_interaction=learn_from_interaction,
+            ask_ollama=ask_ollama,
+        )
 
     @staticmethod
     def _encode_weather_intent(city, country_code=None):

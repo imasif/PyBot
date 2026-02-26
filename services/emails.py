@@ -2,18 +2,64 @@ import html as html_module
 import imaplib
 import json
 import email
+import os
 import re
+from email.message import Message
 from email.header import decode_header
 import logging
 from typing import Optional
 
 import config
 import database
+from dotenv import dotenv_values
 
 logger = logging.getLogger(__name__)
 
+SERVICE_SKILL_COMMANDS = [
+    'build_command_response',
+    'command_help',
+    'handle_command_action',
+    'handle_interaction',
+    'handle_natural_request',
+    'handle_read_number',
+    'interpret_read_request',
+    'interpret_request',
+    'list_recent',
+    'list_unread',
+    'read_full',
+    'search',
+]
+
 
 URL_PATTERN = re.compile(r'https?://[^\s"<>]+')
+
+
+def _clean_credential(value: Optional[str]) -> str:
+    cleaned = (value or '').strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
+        cleaned = cleaned[1:-1].strip()
+    return cleaned
+
+
+def _normalize_email_username(value: Optional[str]) -> str:
+    return _clean_credential(value)
+
+
+def _normalize_app_password(value: Optional[str]) -> str:
+    cleaned = _clean_credential(value)
+    cleaned = ''.join(cleaned.split())
+    return re.sub(r'[^A-Za-z0-9]', '', cleaned)
+
+
+def _read_runtime_gmail_values() -> tuple[str, str]:
+    env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.env'))
+    if os.path.exists(env_path):
+        try:
+            values = dotenv_values(env_path)
+            return values.get('GMAIL_EMAIL', '') or '', values.get('GMAIL_APP_PASSWORD', '') or ''
+        except Exception as exc:
+            logger.debug(f"Could not read .env for runtime gmail values: {exc}")
+    return '', ''
 
 
 def _escape_and_linkify(text: Optional[str], fallback: str = 'Unknown') -> str:
@@ -77,22 +123,46 @@ def _html_to_text(value: str) -> str:
 class EmailService:
     def __init__(self):
         self.imap_host = 'imap.gmail.com'
-        self.username = config.GMAIL_EMAIL
-        self.password = config.GMAIL_APP_PASSWORD
+        self.username = _normalize_email_username(config.GMAIL_EMAIL)
+        self.password = _normalize_app_password(config.GMAIL_APP_PASSWORD)
+        self.last_connect_error = None
 
     def _connect(self) -> Optional[imaplib.IMAP4_SSL]:
+        self.last_connect_error = None
+        config_username = getattr(config, 'GMAIL_EMAIL', '')
+        config_password = getattr(config, 'GMAIL_APP_PASSWORD', '')
+        env_username, env_password = _read_runtime_gmail_values()
+
+        raw_username = env_username or config_username
+        raw_password = env_password or config_password
+
+        self.username = _normalize_email_username(raw_username)
+        self.password = _normalize_app_password(raw_password)
+
         if not self.username or not self.password:
             logger.error("Email credentials missing")
+            self.last_connect_error = "missing_credentials"
             return None
+        if len(self.password) != 16:
+            logger.warning("Gmail App Password length is not 16 after normalization")
         try:
             mail = imaplib.IMAP4_SSL(self.imap_host)
             mail.login(self.username, self.password)
             return mail
         except imaplib.IMAP4.error as e:
             logger.error(f"IMAP login error: {e}")
+            self.last_connect_error = "auth_failed"
         except Exception as e:
             logger.error(f"Unexpected error connecting to IMAP: {e}")
+            self.last_connect_error = "connection_failed"
         return None
+
+    def _connection_help_message(self) -> str:
+        if self.last_connect_error == "missing_credentials":
+            return "Failed to connect to Gmail. Missing GMAIL_EMAIL or GMAIL_APP_PASSWORD."
+        if self.last_connect_error == "auth_failed":
+            return "Failed to connect to Gmail. Authentication failed. Verify Gmail App Password (16 chars), remove spaces/quotes, and ensure IMAP access is enabled."
+        return "Failed to connect to Gmail. Check GMAIL_EMAIL and GMAIL_APP_PASSWORD (use App Password, remove quotes/spaces)."
 
     def _decode_subject(self, subject: Optional[str]) -> str:
         if not subject:
@@ -142,7 +212,7 @@ class EmailService:
     def list_unread(self, limit=5, user_id=None) -> str:
         mail = self._connect()
         if not mail:
-            return "Failed to connect to Gmail. Check credentials."
+            return self._connection_help_message()
         try:
             email_ids = self._fetch_messages(mail, 'UNSEEN', limit)
             if not email_ids:
@@ -155,7 +225,7 @@ class EmailService:
     def list_recent(self, limit=5, user_id=None) -> str:
         mail = self._connect()
         if not mail:
-            return "Failed to connect to Gmail. Check credentials."
+            return self._connection_help_message()
         try:
             email_ids = self._fetch_messages(mail, 'ALL', limit)
             if not email_ids:
@@ -168,7 +238,7 @@ class EmailService:
     def search(self, query: str, limit=5, user_id=None) -> str:
         mail = self._connect()
         if not mail:
-            return "Failed to connect to Gmail. Check credentials."
+            return self._connection_help_message()
         try:
             search_query = f'(OR SUBJECT "{query}" FROM "{query}")'
             email_ids = self._fetch_messages(mail, search_query, limit)
@@ -189,7 +259,7 @@ class EmailService:
             return f"No entry for email {email_number}."
         mail = self._connect()
         if not mail:
-            return "Failed to connect to Gmail. Check credentials."
+            return self._connection_help_message()
         try:
             mail.select('inbox')
             status, msg_data = mail.fetch(email_id, '(RFC822)')
@@ -213,7 +283,91 @@ class EmailService:
         finally:
             mail.logout()
 
-    def _extract_body(self, message: email.message.Message) -> str:
+    def command_help(self) -> str:
+        return email_command_help()
+
+    def handle_command_action(self, action: str, args: Optional[list[str]] = None, user_id: Optional[str] = None) -> str:
+        return handle_email_action(action, args or [], self, str(user_id or ''))
+
+    def handle_natural_request(self, request: dict, user_id: Optional[str] = None) -> str:
+        return handle_email_request(request, self, str(user_id or ''))
+
+    def handle_read_number(self, email_number: int, user_id: Optional[str] = None) -> str:
+        return handle_read_email(email_number, self, str(user_id or ''))
+
+    def interpret_request(self, text: str):
+        return interpret_email_request(text)
+
+    def interpret_read_request(self, text: str):
+        return interpret_read_email_request(text)
+
+    def handle_interaction(self, text: str, user_id: str, **_kwargs):
+        email_number = self.interpret_read_request(text)
+        if email_number:
+            reply = self.handle_read_number(email_number, user_id)
+            return {'handled': True, 'reply': reply, 'parse_mode': 'HTML'}
+
+        email_request = self.interpret_request(text)
+        if email_request:
+            reply = self.handle_natural_request(email_request, user_id)
+            return {'handled': True, 'reply': reply, 'parse_mode': 'HTML'}
+
+        return None
+
+    def build_command_response(self, command_name: str, args: Optional[list[str]] = None, user_id: Optional[str] = None) -> dict:
+        command = (command_name or '').lower().strip()
+        safe_args = args or []
+        safe_user = str(user_id or '')
+
+        if command == 'unread':
+            return {
+                'pre_message': '📧 Checking unread emails...',
+                'reply': self.handle_command_action('unread', [], safe_user),
+                'parse_mode': 'HTML',
+            }
+
+        if command == 'recent':
+            return {
+                'pre_message': '📬 Fetching recent emails...',
+                'reply': self.handle_command_action('recent', [], safe_user),
+                'parse_mode': 'HTML',
+            }
+
+        if command == 'search':
+            if not safe_args:
+                return {
+                    'pre_message': None,
+                    'reply': 'Please provide a search query.\nExample: /search important',
+                    'parse_mode': None,
+                }
+            query = ' '.join(safe_args)
+            return {
+                'pre_message': f"🔍 Searching for '{query}'...",
+                'reply': self.handle_command_action('search', safe_args, safe_user),
+                'parse_mode': 'HTML',
+            }
+
+        if command == 'email':
+            if not safe_args:
+                return {
+                    'pre_message': None,
+                    'reply': self.command_help(),
+                    'parse_mode': None,
+                }
+            action = safe_args[0].lower()
+            return {
+                'pre_message': None,
+                'reply': self.handle_command_action(action, safe_args[1:], safe_user),
+                'parse_mode': 'HTML',
+            }
+
+        return {
+            'pre_message': None,
+            'reply': '❓ Unknown email command.',
+            'parse_mode': None,
+        }
+
+    def _extract_body(self, message: Message) -> str:
         plain_parts = []
         html_parts = []
         if message.is_multipart():

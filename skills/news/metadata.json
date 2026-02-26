@@ -6,6 +6,8 @@
   "description": "Quotes the NewsAPI to deliver top headlines or topic-specific news digests.",
   "commands": ["detect_request", "get_news"],
   "keywords": ["news", "headlines", "latest", "updates", "topic"],
+  "required_config": ["NEWSAPI_KEY"],
+  "status_label": "News",
   "enabled": true,
   "instructions_file": "instructions.md"
 }

@@ -4,8 +4,20 @@
   "module": "services.notes",
   "class": "NotesService",
   "description": "Saves short notes, lists existing entries, and searches note history in SQLite.",
-  "commands": ["detect_request", "create_note", "list_notes", "search_notes"],
-  "keywords": ["note", "memo", "remember", "list", "log"],
+  "commands": [
+    "create_note",
+    "detect_request",
+    "handle_interaction",
+    "list_notes",
+    "search_notes"
+  ],
+  "keywords": [
+    "note",
+    "memo",
+    "remember",
+    "list",
+    "log"
+  ],
   "enabled": true,
   "instructions_file": "instructions.md"
 }
