@@ -1,0 +1,105 @@
+name: Build and Publish Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            archive_ext: tar.gz
+          - os: macos-latest
+            platform: macos
+            archive_ext: tar.gz
+          - os: windows-latest
+            platform: windows
+            archive_ext: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build binary (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x scripts/build_binary.sh
+          ./scripts/build_binary.sh
+
+      - name: Build binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $modules = @()
+          Get-ChildItem -Path skills -Filter metadata.json -Recurse | ForEach-Object {
+            try {
+              $raw = Get-Content $_.FullName -Raw | ConvertFrom-Json
+              if ($raw.module) { $modules += [string]$raw.module }
+            } catch {
+            }
+          }
+          $modules = $modules | Sort-Object -Unique
+
+          $args = @(
+            '--noconfirm',
+            '--clean',
+            '--name', 'pybot',
+            '--onedir',
+            '--add-data', 'skills;skills',
+            '--add-data', 'services;services',
+            '--add-data', '.env.example;.env.example',
+            'bot.py'
+          )
+
+          foreach ($module in $modules) {
+            $args += '--hidden-import'
+            $args += $module
+          }
+
+          python -m PyInstaller @args
+
+      - name: Package artifact (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          ARCHIVE_NAME="pybot-${{ matrix.platform }}.${{ matrix.archive_ext }}"
+          tar -czf "$ARCHIVE_NAME" -C dist pybot
+          sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
+
+      - name: Package artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archiveName = 'pybot-${{ matrix.platform }}.${{ matrix.archive_ext }}'
+          Compress-Archive -Path dist/pybot/* -DestinationPath $archiveName -Force
+          $hash = Get-FileHash $archiveName -Algorithm SHA256
+          "$($hash.Hash.ToLower())  $archiveName" | Out-File -FilePath "$archiveName.sha256" -Encoding ascii
+
+      - name: Publish GitHub Release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          overwrite_files: true
+          files: |
+            pybot-${{ matrix.platform }}.${{ matrix.archive_ext }}
+            pybot-${{ matrix.platform }}.${{ matrix.archive_ext }}.sha256

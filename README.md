@@ -60,6 +60,35 @@ A powerful Telegram-based AI personal assistant with **19 core features** includ
 
 For full setup + binary build instructions, see [INSTALL.md](INSTALL.md).
 
+### Download Prebuilt Binaries (GitHub Releases)
+
+Each tagged release publishes these assets automatically via GitHub Actions:
+
+- `pybot-linux.tar.gz` + `pybot-linux.tar.gz.sha256`
+- `pybot-macos.tar.gz` + `pybot-macos.tar.gz.sha256`
+- `pybot-windows.zip` + `pybot-windows.zip.sha256`
+
+Download from your repository’s **Releases** page, then verify checksum.
+
+**Linux/macOS:**
+```bash
+sha256sum -c pybot-linux.tar.gz.sha256
+# or
+sha256sum -c pybot-macos.tar.gz.sha256
+```
+
+**Windows (PowerShell):**
+```powershell
+Get-FileHash .\pybot-windows.zip -Algorithm SHA256
+# compare the hash with pybot-windows.zip.sha256
+```
+
+Run binary after extracting:
+
+```bash
+./pybot/pybot
+```
+
 ### Prerequisites
 - Python 3.12+
 - Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
@@ -299,6 +328,24 @@ Contributions welcome! Please:
 3. Commit your changes
 4. Push to the branch
 5. Open a Pull Request
+
+### Release Process
+
+This project builds release binaries automatically from Git tags.
+
+```bash
+git add -A
+git commit -m "release: v0.0.2"
+git tag v0.0.2
+git push origin main
+git push origin v0.0.2
+```
+
+After the workflow completes, check the GitHub **Releases** page for:
+- `pybot-linux.tar.gz`
+- `pybot-macos.tar.gz`
+- `pybot-windows.zip`
+- their corresponding `.sha256` checksum files
 
 ## 📜 License
 
