@@ -412,259 +412,37 @@ def auto_resolve_common_queries(text):
 # ---------- Weather Functions ----------
 def get_weather(city=None, country_code=None, style='standard'):
     """Get weather information from WeatherService."""
-    try:
-        return weather_service.get_weather(city=city, country_code=country_code, style=style)
-    except RuntimeError:
-        return "❌ Weather service not configured. Please add OPENWEATHER_API_KEY to .env file.\nGet your free API key at: https://openweathermap.org/api"
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Weather API error: {e}")
-        city_label = city or config.DEFAULT_CITY
-        return f"❌ Could not fetch weather for {city_label}. Please check the city name and try again."
-    except KeyError as e:
-        logger.error(f"Weather data parsing error: {e}")
-        return "❌ Error parsing weather data."
-    except Exception as e:
-        logger.error(f"Unexpected weather error: {e}")
-        return "❌ An unexpected error occurred while fetching weather."
+    if weather_service is None:
+        return "❌ Weather service is unavailable."
+    return weather_service.get_weather_response(city=city, country_code=country_code, style=style)
 
 def detect_weather_request(text, user_id=None):
-    """Detect if user is asking for weather information"""
-    
-    text_lower = text.lower().strip()
-
-    # Short follow-up style requests (e.g., "detailed?") should still trigger weather
-    if text_lower in ['detailed', 'detailed?', 'brief', 'brief?', 'default', 'default?']:
-        if user_id:
-            last_city = database.get_user_context(user_id, 'last_weather_city')
-            last_country = database.get_user_context(user_id, 'last_weather_country')
-            if last_city:
-                return {'is_weather': True, 'city': last_city, 'country_code': last_country}
-    
-    # Weather keywords
-    weather_patterns = [
-        r'(?:what(?:\'s| is)|how(?:\'s| is))? (?:the )?weather',
-        r'weather (?:in|for|at)',
-        r'(?:check|show|get|tell me)(?: the)? weather',
-        r'temperature (?:in|at|for)',
-        r'(?:is it|will it) (?:rain|snow|sunny|cold|hot)',
-        r'forecast (?:for|in)?',
-    ]
-    
-    for pattern in weather_patterns:
-        if re.search(pattern, text_lower):
-            # PRIORITY 1: Try to extract city and country from current message
-            city_match = re.search(r'(?:in|for|at) ([a-zA-Z\s,]+)(?:\?|$)', text_lower)
-            if city_match:
-                location = city_match.group(1).strip()
-
-                # Ignore style/mode phrases mistakenly captured as location
-                style_only_patterns = [
-                    r'^(?:brief|short|detailed|detail|default|standard)\s+mode$',
-                    r'^(?:brief|short|detailed|detail|default|standard)$',
-                    r'^(?:news\s*like|news-like)\s+(?:brief|mode)$'
-                ]
-                if any(re.search(pattern, location, re.IGNORECASE) for pattern in style_only_patterns):
-                    city_match = None
-                else:
-                    # Remove trailing style-mode qualifiers from extracted location
-                    location = re.sub(r'\b(?:brief|short|detailed|detail|default|standard)\s+mode\b', '', location, flags=re.IGNORECASE).strip(' ,')
-                    location = re.sub(r'\b(?:in\s+)?(?:brief|short|detailed|detail|default|standard)\b$', '', location, flags=re.IGNORECASE).strip(' ,')
-
-                if not city_match:
-                    location = None
-
-                if location:
-                    # Check if country code is provided (e.g., "London, UK" or "Tokyo, Japan")
-                    if ',' in location:
-                        parts = location.split(',')
-                        city = parts[0].strip()
-                        country = parts[1].strip()
-
-                        # Check if country is a 2-letter code or country name
-                        if len(country) <= 3:
-                            country_code = country.upper()
-                        else:
-                            country_code = None
-                            city = location  # Use full location string if country is not a code
-                    else:
-                        city = location
-                        country_code = None
-
-                    result = {'is_weather': True, 'city': city, 'country_code': country_code}
-
-                    # 📚 Learn this pattern for next time
-                    if user_id:
-                        intent = f"weather:{city}"
-                        learn_from_interaction(user_id, text_lower, 'weather', intent)
-
-                    return result
-            
-            # PRIORITY 2: No city in current message - check learned patterns
-            if user_id:
-                learned_intent = check_learned_patterns(user_id, text_lower, 'weather')
-                if learned_intent:
-                    # Parse learned intent (format: "weather:city")
-                    if ':' in learned_intent:
-                        intent_key, city = learned_intent.split(':', 1)
-                        if intent_key == 'weather':
-                            return {'is_weather': True, 'city': city, 'country_code': None}
-                        if intent_key == 'weather_style':
-                            # If style phrase is used, fallback to saved location
-                            pass
-            
-            # PRIORITY 3: No learned pattern - check saved preferences
-            if user_id:
-                last_city = database.get_user_context(user_id, 'last_weather_city')
-                last_country = database.get_user_context(user_id, 'last_weather_country')
-                
-                if last_city:
-                    # Normalize legacy free-form saved location (e.g., "area, zone, city")
-                    if ',' in last_city:
-                        normalized = normalize_location_for_weather(last_city)
-                        if normalized and normalized.get('city'):
-                            last_city = normalized.get('city')
-                            if not last_country:
-                                last_country = normalized.get('country_code')
-                            database.save_user_context(user_id, 'last_weather_city', last_city)
-                            if last_country:
-                                database.save_user_context(user_id, 'last_weather_country', last_country)
-                    # Use saved location
-                    return {'is_weather': True, 'city': last_city, 'country_code': last_country}
-            
-            # PRIORITY 4: No saved location - ask the user
-            return {'is_weather': True, 'city': 'ASK_USER', 'country_code': None}
-    
-    return None
+    """Detect if user is asking for weather information."""
+    if weather_service is None:
+        return None
+    return weather_service.detect_weather_request(
+        text,
+        user_id=user_id,
+        get_user_context=lambda uid, key: database.get_user_context(uid, key),
+        save_user_context=lambda uid, key, value: database.save_user_context(uid, key, value),
+        check_learned_patterns=check_learned_patterns,
+        learn_from_interaction=learn_from_interaction,
+        ask_ollama=ask_ollama,
+    )
 
 
 def detect_weather_style_learning_request(text):
     """Detect requests to learn preferred weather response style."""
-    text_lower = text.lower().strip()
-
-    wants_weather = ('weather' in text_lower) or ('forecast' in text_lower)
-    short_style_followup = text_lower in ['detailed', 'detailed?', 'brief', 'brief?', 'default', 'default?']
-    if short_style_followup:
-        wants_weather = True
-    wants_brief = any(keyword in text_lower for keyword in [
-        'brief', 'news like', 'news-like', 'nl brief', 'natural brief', 'short weather', 'weather brief'
-    ])
-    wants_detail = any(keyword in text_lower for keyword in [
-        'detailed weather', 'detail weather', 'full weather', 'normal weather', 'default weather'
-    ])
-
-    explicit_learning = any(keyword in text_lower for keyword in [
-        'learn', 'remember', 'save', 'set as default', 'use this style', 'from now on'
-    ])
-
-    if wants_weather and wants_brief:
-        return {'style': 'brief', 'explicit_learning': explicit_learning}
-    if wants_weather and wants_detail:
-        return {'style': 'standard', 'explicit_learning': explicit_learning}
-
-    return None
-
-
-def country_name_to_code(country_name):
-    """Convert common country names to ISO-like short codes for weather queries."""
-    if not country_name:
+    if weather_service is None:
         return None
-
-    name = country_name.strip().lower()
-    mapping = {
-        "bangladesh": "BD",
-        "bd": "BD",
-        "united kingdom": "GB",
-        "uk": "GB",
-        "great britain": "GB",
-        "united states": "US",
-        "usa": "US",
-        "us": "US",
-        "japan": "JP",
-        "france": "FR",
-        "india": "IN",
-        "canada": "CA",
-    }
-    return mapping.get(name, country_name.upper() if len(country_name.strip()) <= 3 else None)
-
-
-def normalize_location_for_weather(raw_location):
-    """Normalize a free-form location into weather-friendly city/country fields."""
-    if not raw_location:
-        return None
-
-    # 1) LLM-assisted parsing
-    try:
-        prompt = f'''Extract city and country from this location for weather API use.
-
-Location: "{raw_location}"
-
-Return ONLY valid JSON:
-{{"city": "...", "country_name": "...", "country_code": "..."}}
-
-Rules:
-- city must be the main weather city (not neighborhood)
-- country_code should be ISO 2-letter uppercase when possible
-- if unsure, keep best guess
-'''
-        ai_response = ask_ollama(prompt, [])
-        json_match = re.search(r'\{[\s\S]*\}', ai_response)
-        if json_match:
-            parsed = json.loads(json_match.group())
-            city = (parsed.get('city') or '').strip()
-            country_name = (parsed.get('country_name') or '').strip()
-            country_code = (parsed.get('country_code') or '').strip().upper()
-            if not country_code and country_name:
-                country_code = country_name_to_code(country_name)
-            if city:
-                return {
-                    "city": city,
-                    "country_name": country_name or None,
-                    "country_code": country_code or None,
-                    "raw_location": raw_location,
-                }
-    except Exception:
-        pass
-
-    # 2) Heuristic fallback
-    parts = [part.strip() for part in raw_location.split(',') if part.strip()]
-    if len(parts) >= 2:
-        country_part = parts[-1]
-        city_part = parts[-2] if len(parts) >= 3 else parts[0]
-        return {
-            "city": city_part,
-            "country_name": country_part,
-            "country_code": country_name_to_code(country_part),
-            "raw_location": raw_location,
-        }
-
-    return {
-        "city": raw_location.strip(),
-        "country_name": None,
-        "country_code": None,
-        "raw_location": raw_location,
-    }
+    return weather_service.detect_weather_style_learning_request(text)
 
 
 def detect_location_learning_request(text):
     """Detect explicit location preference learning requests from natural language."""
-    text_normalized = text.strip()
-
-    patterns = [
-        r'^(?:learn|remember|save) my location\s*[:\-]?\s*(.+)$',
-        r'^(?:my location is|set my location to)\s+(.+)$',
-        r'^(?:use|set) (.+) as my default location$'
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text_normalized, re.IGNORECASE)
-        if match:
-            raw_location = match.group(1).strip().strip('.')
-            if not raw_location:
-                return None
-
-            return normalize_location_for_weather(raw_location)
-
-    return None
+    if weather_service is None:
+        return None
+    return weather_service.detect_location_learning_request(text, ask_ollama=ask_ollama)
 
 # ---------- Notes Functions ----------
 def detect_note_request(text, user_id=None):
@@ -3190,7 +2968,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             database.save_user_context(user_id, 'last_weather_country', country_code)
 
         # Learn this phrasing for weather intent too
-        learn_from_interaction(user_id, user_message.lower().strip(), 'weather', f"weather:{city}")
+        if weather_service and hasattr(weather_service, '_encode_weather_intent'):
+            learned_intent = weather_service._encode_weather_intent(city, country_code)
+        else:
+            learned_intent = f"weather:{city}"
+        learn_from_interaction(user_id, user_message.lower().strip(), 'weather', learned_intent)
 
         reply = f"📍 Got it! I saved your default location as: *{raw_location}*\n"
         reply += f"🌆 Weather city: *{city}*\n"
